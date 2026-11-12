@@ -1,0 +1,125 @@
+{% extends "base.html" %}
+{% block title %}餐別與規則{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>餐別與規則</h1>
+    <div class="desc">
+      為 A／B／C 加上業務名稱，說明每個餐單代表甚麼；同時設定貨倉代碼與需要看 RP Type 的店舖。
+    </div>
+  </div>
+</div>
+
+<form method="post" action="/admin/settings">
+  <section class="card">
+    <header>
+      <h2>餐別名稱與備註</h2>
+      <span class="hint">所有月份共用</span>
+    </header>
+    <div class="body flush">
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th style="width:72px">餐別</th>
+              <th style="width:230px">名稱</th>
+              <th>備註（會顯示在結果頁）</th>
+              <th style="width:130px">非經常性</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for sc in scenarios %}
+            <tr>
+              <td class="strong">{{ sc }} 餐</td>
+              <td>
+                <input class="input" type="text" maxlength="60" name="label_{{ sc }}"
+                       value="{{ meta[sc].label }}" placeholder="{{ '例如：恆常推廣' }}"
+                       data-label="{{ sc }}">
+              </td>
+              <td>
+                <input class="input" type="text" maxlength="300" name="remark_{{ sc }}"
+                       value="{{ meta[sc].remark }}" placeholder="選填，例如：只在大節月份推出">
+              </td>
+              <td>
+                <label style="display:flex;align-items:center;gap:7px;font-size:13px">
+                  <input type="checkbox" name="optional_{{ sc }}" value="1"
+                         {{ 'checked' if meta[sc].optional }}>
+                  <span class="dim">可略過</span>
+                </label>
+              </td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+      名稱會與餐別一併顯示，例如「A 餐 · 恆常推廣」。勾選「可略過」的餐別（通常是 C 餐）在未設定佔比時，
+      不會被當成「未就緒」，也不會出現在計算結果；有設定佔比時仍然照常計算。
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>貨倉</h2><span class="hint">派貨上限</span></header>
+    <div class="body">
+      <label class="field" style="max-width:420px">
+        <span>貨倉代碼</span>
+        <input class="input" type="text" name="warehouse_sites" value="{{ warehouse_raw }}"
+               placeholder="D001">
+      </label>
+      <p class="dim" style="font-size:12.5px;margin:0 0 12px">
+        多個貨倉用逗號分隔。這些 Site 不會成為店舖、不會收到分配，只用來限制派貨量。
+      </p>
+      <p class="dim" style="font-size:12.5px;margin:0">
+        只計 <span class="mono">SaSa Net Stock</span>；<span class="mono">Pending Received</span>
+        是入倉中的貨，未到倉之前不能派，所以不計入上限。
+      </p>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>RP Type 派貨規則</h2><span class="hint">店舖層級例外</span></header>
+    <div class="body">
+      <label class="field" style="max-width:420px">
+        <span>需要看 RP Type 的店舖</span>
+        <input class="input" type="text" name="rp_gate_shops" value="{{ gate_raw }}"
+               placeholder="HB87">
+      </label>
+      <p class="dim" style="font-size:12.5px;margin:0 0 12px">
+        多間店舖用逗號分隔。留空表示沒有店舖受此限制。
+      </p>
+
+      <div class="alert warn" style="margin-bottom:14px">
+        <span class="tag">規則</span>
+        <span>
+          這些店舖的 SKU，只有庫存檔的 <strong>RP Type = RF</strong> 才會派貨。
+          <strong>ND 或未提供</strong>一律出 0 件，即使該店分配量大於現有庫存。
+          其他店舖完全不理會 RP Type。
+        </span>
+      </div>
+
+      {% set missing = [] %}
+      {% for code in rp_gate_shops %}{% if code not in shop_codes %}{% set _ = missing.append(code) %}{% endif %}{% endfor %}
+      {% if missing %}
+      <div class="alert error">
+        <span class="tag">未生效</span>
+        <span>{{ missing | join('、') }} 不在店舖主檔內，規則不會套用到任何資料。</span>
+      </div>
+      {% endif %}
+
+      <p class="dim" style="font-size:12.5px;margin:0">
+        RP Type 由庫存檔提供（SAP 明細的 <span class="mono">RP Type</span> 欄）。
+        寬表格式沒有這一欄，該店會被當作全部未提供，結果頁會提示。
+      </p>
+    </div>
+    <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
+      <span class="dim" style="font-size:12.5px">
+        改名不影響歷史批次：每個批次會保留計算當時的名稱。
+      </span>
+      <button class="btn primary" type="submit">儲存設定</button>
+    </div>
+  </section>
+</form>
+
+{% endblock %}

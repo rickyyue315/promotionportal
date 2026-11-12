@@ -11,3 +11,10 @@ tools/_shots/
 tests/_data/
 .pytest_cache/
 .DS_Store
+
+# Local agent notes, not application code.
+.workbuddy/
+
+# Real SAP exports dropped in for testing: business data, never commit.
+LNU_*.XLSX
+LNU_*.xlsx

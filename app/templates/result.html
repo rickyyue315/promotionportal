@@ -16,6 +16,34 @@
   </div>
 </div>
 
+{% if params.promo_start %}
+<section class="card">
+  <div class="body split" style="font-size:13px;gap:18px;flex-wrap:wrap">
+    <div><span class="dim">推廣期</span>
+      <strong>{{ params.promo_start }}</strong> → <strong>{{ params.promo_end }}</strong>
+      <span class="dim">（{{ params.promo_days }} 日）</span></div>
+    <div><span class="dim">每次派貨</span> <strong>{{ params.dispatch_days }} 日</strong>
+      <span class="dim">，派貨目標 = Target × {{ params.dispatch_days }}/{{ params.promo_days }}</span></div>
+    <div><span class="dim">銷售數據截止</span> {{ params.as_of }}</div>
+  </div>
+  {% if schedule %}
+  <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px">
+    <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
+      <span class="dim">派貨批次</span>
+      {% for idx, s, e in schedule %}
+      <span class="badge {{ 'ok' if today >= s and today <= e else 'neutral' }}">
+        第 {{ idx }} 批 · {{ s.strftime('%m-%d') }}–{{ e.strftime('%m-%d') }}
+      </span>
+      {% endfor %}
+      <span class="dim" style="margin-left:4px">
+        今日 {{ today.strftime('%Y-%m-%d') }}{% if days_to_start is not none %}，距首批派貨 {{ days_to_start }} 日{% endif %}
+      </span>
+    </div>
+  </div>
+  {% endif %}
+</section>
+{% endif %}
+
 <div class="kpis">
   <div class="kpi">
     <div class="label">SKU 數</div>
@@ -28,11 +56,11 @@
   {% if best_dispatch %}
   <div class="kpi">
     <div class="label">派貨最省</div>
-    <div class="value">{{ best_dispatch }} 餐<small>{{ totals[best_dispatch].total_dispatch | num }} 件</small></div>
+    <div class="value">{{ scname(best_dispatch, labels) }}<small>{{ totals[best_dispatch].total_dispatch | num }} 件</small></div>
   </div>
-  <div class="kpi {{ 'danger' if totals[best_dispatch].shortfall_qty }}">
-    <div class="label">虧欠合計</div>
-    <div class="value">{{ totals[best_dispatch].shortfall_qty | num }}<small>件 · 三情境相同</small></div>
+  <div class="kpi {{ 'danger' if totals[best_dispatch].short_qty }}">
+    <div class="label">倉存缺貨</div>
+    <div class="value">{{ totals[best_dispatch].short_qty | num }}<small>件 · 需求減可派</small></div>
   </div>
   {% endif %}
 </div>
@@ -42,24 +70,49 @@
   {% set t = totals[sc] %}
   <section class="card">
     <header>
-      <h2>{{ sc }} 餐</h2>
+      <h2>{{ scname(sc, labels) }}</h2>
       <span class="hint">佔比總和 {{ '%.2f%%' % ((share_totals.get(sc, 1)) * 100) }}</span>
     </header>
     <div class="body">
+      {% if labels[sc] and labels[sc].remark %}
+      <p class="dim" style="font-size:12.5px;margin:0 0 10px">{{ labels[sc].remark }}</p>
+      {% endif %}
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
         <span class="dim">Target 總量</span><span class="num strong">{{ t.target_qty | num }}</span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
-        <span class="dim">現有總庫存</span><span class="num">{{ t.total_stock | num }}</span>
+        <span class="dim">派貨目標（{{ params.dispatch_days or '—' }}/{{ params.promo_days or '—' }} 日）</span>
+        <span class="num">{{ t.dispatch_target | num }}</span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
-        <span class="dim">需派貨合計</span><span class="num strong">{{ t.total_dispatch | num }}</span>
+        <span class="dim">店舖庫存 ／ 在途</span>
+        <span class="num">{{ t.total_stock | num }} ／ {{ t.total_pending | num }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">倉存（{{ (params.warehouse_sites or ['—']) | join('、') }}）</span>
+        <span class="num">{{ t.warehouse_qty | num }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">需求 ／ 實際可派</span>
+        <span class="num strong">{{ t.need_qty | num }} ／ {{ t.total_dispatch | num }}</span>
+      </div>
+      {% if t.blocked_qty %}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">RP Type 不派</span>
+        <span class="num"><span class="badge warn">{{ t.blocked_qty | num }} 件</span></span>
+      </div>
+      {% endif %}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">倉存缺貨</span>
+        <span class="num">
+          <span class="{{ 'badge danger' if t.short_qty else 'badge ok' }}">{{ t.short_qty | num }} 件</span>
+          <span class="dim" style="margin-left:6px">需求 − 可派</span>
+        </span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:5px 0">
-        <span class="dim">虧欠 / 不夠貨</span>
+        <span class="dim">不夠貨（Target 未覆蓋）</span>
         <span class="num">
-          <span class="{{ 'badge danger' if t.shortfall_qty else 'badge ok' }}">{{ t.shortfall_qty | num }} 件</span>
-          <span class="dim" style="margin-left:6px">{{ t.n_short }} SKU</span>
+          <span class="{{ 'badge danger' if t.n_short else 'badge ok' }}">{{ t.n_short }} SKU</span>
         </span>
       </div>
       <div style="margin-top:12px">
@@ -105,39 +158,55 @@
             <th rowspan="2">SKU</th>
             <th rowspan="2">名稱</th>
             <th class="num" rowspan="2">Target</th>
-            <th class="num" rowspan="2">現有庫存</th>
-            <th class="num" rowspan="2">虧欠</th>
+            <th class="num" rowspan="2">派貨目標</th>
+            <th class="num" rowspan="2">日銷</th>
+            <th class="num" rowspan="2">預計銷量</th>
+            <th class="num" rowspan="2">目標差距</th>
+            <th class="num" rowspan="2">店舖庫存</th>
+            <th class="num" rowspan="2">倉存</th>
+            <th class="num" rowspan="2">夠貨</th>
             {% for sc in scenarios if totals[sc].n_sku %}
-            <th class="num" colspan="2" style="text-align:center;border-left:1px solid var(--border)">{{ sc }} 餐</th>
+            <th class="num" colspan="2" style="text-align:center;border-left:1px solid var(--border)">{{ scname(sc, labels) }}</th>
             {% endfor %}
           </tr>
           <tr>
             {% for sc in scenarios if totals[sc].n_sku %}
             <th class="num" style="border-left:1px solid var(--border)">派貨</th>
-            <th class="num">夠貨</th>
+            <th class="num">缺貨</th>
             {% endfor %}
           </tr>
         </thead>
         <tbody>
         {% for row in rows %}
           {% set short = row.shortfall_qty > 0 %}
+          {% set s0 = (row.scenarios.values() | list | first) %}
           <tr class="{{ 'is-short' if short }}" data-short="{{ 1 if short else 0 }}"
               data-search="{{ (row.sku ~ ' ' ~ row.description) | lower }}">
             <td class="mono">{{ row.sku }}</td>
             <td class="dim">{{ row.description or '—' }}</td>
             <td class="num">{{ row.target_qty | num }}</td>
-            <td class="num">{{ row.total_stock | num }}</td>
+            <td class="num">{{ s0.dispatch_target | num if s0 else '—' }}</td>
+            <td class="num">{{ '%.1f' % s0.daily_rate if s0 else '—' }}</td>
+            <td class="num">{{ s0.expected_sales | num if (s0 and params.has_sales) else '—' }}</td>
             <td class="num">
-              {% if short %}<span class="badge danger">{{ row.shortfall_qty | num }}</span>
+              {% if params.has_sales and s0 %}
+                <span style="color:{{ '#b3392c' if s0.gap_target > 0 else 'inherit' }}">{{ s0.gap_target | num }}</span>
               {% else %}<span class="dim">—</span>{% endif %}
+            </td>
+            <td class="num">{{ row.total_stock | num }}</td>
+            <td class="num">{{ s0.warehouse_qty | num if s0 else '—' }}</td>
+            <td class="num">
+              {% if s0 %}
+                <span class="badge {{ 'ok' if s0.enough else 'danger' }}">{{ '是' if s0.enough else '否' }}</span>
+              {% else %}—{% endif %}
             </td>
             {% for sc in scenarios if totals[sc].n_sku %}
               {% set s = row.scenarios.get(sc) %}
               <td class="num" style="border-left:1px solid #f0f0ec">{{ s.total_dispatch | num if s else '—' }}</td>
               <td class="num">
-                {% if s %}
-                  <span class="badge {{ 'ok' if s.enough else 'danger' }}">{{ '是' if s.enough else '否' }}</span>
-                {% else %}—{% endif %}
+                {% if s and s.short_qty %}
+                  <span class="badge danger">{{ s.short_qty | num }}</span>
+                {% else %}<span class="dim">—</span>{% endif %}
               </td>
             {% endfor %}
           </tr>
@@ -147,8 +216,12 @@
     </div>
   </div>
   <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
-    「夠貨」比較的是 SKU 的總庫存與 Target。顯示「否」代表即使把全公司庫存都調過來也不夠，需要補貨。
-    「派貨」是各店分配量減現有庫存後的缺口，會依 MOQ 向上取整。
+    「派貨目標」是 Target 按派貨日數縮小後的數量；「日銷」＝（上月銷量＋本月銷量）÷ 有紀錄日數，新產品由 Launch Date 起計。
+    「目標差距」＝ Target − 推廣期預計銷量，正數代表按現時銷量做不到 Target。
+    「夠貨」＝ 店舖庫存 ＋ 在途 ＋ 倉存 是否足以覆蓋整個 Target；「缺貨」是倉存應付不來的需求，已按需求比例分配到各店。
+    {% if gate %}
+    <br>RP Type 規則：{{ gate | join('、') }} 只有 RP Type = RF 才派貨，ND 或未提供一律 0 件，因此實際派貨量會較低。
+    {% endif %}
   </div>
 </section>
 

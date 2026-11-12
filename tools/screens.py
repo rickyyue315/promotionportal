@@ -8,8 +8,8 @@ stylesheet, then screenshots each page with headless Chrome.
 
 from __future__ import annotations
 
+import io
 import os
-import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -20,9 +20,13 @@ sys.path.insert(0, str(ROOT))
 DATA = ROOT / "tools" / "_shotdata"
 SITE = ROOT / "tools" / "_shots"
 for path in (DATA, SITE):
-    if path.exists():
-        shutil.rmtree(path)
-    path.mkdir(parents=True)
+    path.mkdir(parents=True, exist_ok=True)
+
+# Start from an empty database each run; screenshots overwrite by name.
+for name in ("portal.db", "portal.db-wal", "portal.db-shm"):
+    stale = DATA / name
+    if stale.exists():
+        stale.unlink()
 
 os.environ["DATA_DIR"] = str(DATA)
 os.environ["SECRET_KEY"] = "shot"
@@ -68,6 +72,67 @@ def shoot(client: TestClient, path: str, name: str, height: int = 1200) -> Path:
     return png
 
 
+def _hb87_demo(client: TestClient) -> int:
+    """A small month that shows the HB87 RP Type gate in isolation."""
+    from openpyxl import Workbook
+
+    period = "2026-12"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shares"
+    ws.append(["Shop", "店舖名稱", "A"])
+    ws.append(["HB87", "HB87 特殊店", 0.6])
+    ws.append(["HA01", "HA01 門市", 0.4])
+    buf = io.BytesIO()
+    wb.save(buf)
+    client.post(
+        "/admin/shares/import",
+        data={"period": period},
+        files={"file": ("shares.xlsx", buf.getvalue())},
+        follow_redirects=False,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
+    ws.append(["111058302001", "抗痘面膜 7片", 100, 6])
+    ws.append(["111058302002", "保濕精華 30ml", 80, 6])
+    tbuf = io.BytesIO()
+    wb.save(tbuf)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        ["Article", "Article Description", "RP Type", "Safety Stock",
+         "SaSa Net Stock", "Site"]
+    )
+    ws.append(["111058302001", "抗痘面膜 7片", "ND", 0, 0, "HB87"])
+    ws.append(["111058302001", "抗痘面膜 7片", "RF", 0, 0, "HA01"])
+    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HB87"])
+    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HA01"])
+    sbuf = io.BytesIO()
+    wb.save(sbuf)
+
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            # A 4-day promotion sent as 4 days: the target is not scaled, so the
+            # screenshot shows the gate rather than the arithmetic.
+            "promo_start": "2026-12-01",
+            "promo_end": "2026-12-04",
+            "dispatch_days": "4",
+        },
+        files={
+            "target_file": ("target.xlsx", tbuf.getvalue()),
+            "stock_file": ("stock.xlsx", sbuf.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    return int(resp.headers["location"].rstrip("/").split("/")[-1])
+
+
 def main() -> None:
     samples = ROOT / "samples"
     with TestClient(app) as c:
@@ -80,10 +145,16 @@ def main() -> None:
         )
         resp = c.post(
             "/run/new",
-            data={"period": "2026-11"},
+            data={
+                "period": "2026-11",
+                # 14 days of promotion but only 4 days of stock: 1400 -> 400.
+                "promo_start": "2026-11-16",
+                "promo_end": "2026-11-29",
+                "dispatch_days": "4",
+            },
             files={
                 "target_file": ("t.xlsx", (samples / "sample_target.xlsx").read_bytes()),
-                "stock_file": ("s.xlsx", (samples / "sample_stock_wide.xlsx").read_bytes()),
+                "stock_file": ("s.xlsx", (samples / "sample_stock_sap.xlsx").read_bytes()),
             },
             follow_redirects=False,
         )
@@ -95,9 +166,16 @@ def main() -> None:
         shoot(c, "/run/new?period=2026-11", "03_upload", 1150)
         shoot(c, f"/run/{run_id}", "04_result", 1500)
         shoot(c, f"/run/{run_id}/detail?scenario=A", "05_detail_shops", 1300)
-        shoot(c, f"/run/{run_id}/detail?scenario=A&sku=109991605010", "06_detail_sku", 1300)
+        shoot(c, f"/run/{run_id}/detail?scenario=A&sku=111888009033", "06_detail_sku", 1300)
         shoot(c, "/admin/shops", "07_shops", 1200)
         shoot(c, "/runs", "08_runs", 900)
+
+        # A month that exercises the HB87 RP Type rule on its own. It also puts
+        # HB87 into the shop master, so the settings page no longer warns.
+        hb_run = _hb87_demo(c)
+        shoot(c, "/admin/settings", "10_settings", 1100)
+        shoot(c, f"/run/{hb_run}", "11_result_hb87", 1400)
+        shoot(c, f"/run/{hb_run}/detail?scenario=A&sku=111058302001", "12_detail_hb87", 1500)
 
     # login page has no session
     with TestClient(app) as c:

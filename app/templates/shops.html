@@ -13,27 +13,36 @@
   <section class="card">
     <header><h2>新增店舖</h2></header>
     <div class="body">
-      <form method="post" action="/admin/shops" class="row">
-        <div style="flex:1">
-          <label class="field"><span>店舖代碼</span>
-            <input class="input" name="code" placeholder="HA19" required>
-          </label>
+      <form method="post" action="/admin/shops">
+        <div class="row">
+          <div style="flex:1">
+            <label class="field"><span>店舖代碼</span>
+              <input class="input" name="code" placeholder="HA19" required>
+            </label>
+          </div>
+          <div style="flex:1.6">
+            <label class="field"><span>名稱（可留空）</span>
+              <input class="input" name="name" placeholder="銅鑼灣店">
+            </label>
+          </div>
         </div>
-        <div style="flex:1.4">
-          <label class="field"><span>名稱（可留空）</span>
-            <input class="input" name="name" placeholder="銅鑼灣店">
-          </label>
-        </div>
-        <div style="flex:.6">
-          <label class="field"><span>地區</span>
-            <select class="input" name="region">
-              <option value="HK">HK</option>
-              <option value="MO">MO</option>
-            </select>
-          </label>
-        </div>
-        <div style="flex:0 0 auto;display:flex;align-items:flex-end">
-          <button class="btn primary" type="submit" style="margin-bottom:12px">新增</button>
+        <div class="row">
+          <div style="flex:1.2">
+            <label class="field"><span>OM（可留空）</span>
+              <input class="input" name="om" placeholder="區域經理">
+            </label>
+          </div>
+          <div style="flex:.8">
+            <label class="field"><span>地區</span>
+              <select class="input" name="region">
+                <option value="HK">HK</option>
+                <option value="MO">MO</option>
+              </select>
+            </label>
+          </div>
+          <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+            <button class="btn primary" type="submit" style="margin-bottom:12px">新增</button>
+          </div>
         </div>
       </form>
     </div>
@@ -63,6 +72,7 @@
           <tr>
             <th style="width:110px">代碼</th>
             <th>名稱</th>
+            <th style="width:150px">OM</th>
             <th style="width:90px">地區</th>
             <th style="width:100px">狀態</th>
             <th style="width:170px"></th>
@@ -74,6 +84,10 @@
             <td class="mono strong">{{ shop.code }}</td>
             <td>
               <input class="input" form="f{{ shop.id }}" name="name" value="{{ shop.name }}"
+                     placeholder="—" style="padding:5px 9px">
+            </td>
+            <td>
+              <input class="input" form="f{{ shop.id }}" name="om" value="{{ shop.om }}"
                      placeholder="—" style="padding:5px 9px">
             </td>
             <td>

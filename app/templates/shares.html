@@ -14,6 +14,7 @@
       <button class="btn" type="submit">切換月份</button>
     </form>
     <a class="btn" href="/admin/shares/template?period={{ period }}">下載範本</a>
+    <a class="btn" href="/admin/settings">餐別名稱／規則</a>
   </div>
 </div>
 
@@ -25,7 +26,8 @@
   {% for sc in scenarios %}
     <a href="/admin/shares?period={{ period }}&scenario={{ sc }}"
        class="{{ 'active' if sc == scenario }}">
-      {{ sc }} 餐
+      {{ scname(sc, labels) }}
+      {% if status[sc].optional %}<span style="opacity:.65">（非經常性）</span>{% endif %}
       {% if status[sc].ready %}✓{% elif status[sc].total %}· {{ '%.1f%%' % (status[sc].total * 100) }}{% endif %}
     </a>
   {% endfor %}
@@ -40,7 +42,7 @@
 
 <section class="card">
   <header>
-    <h2>{{ period }} ／ {{ scenario }} 餐</h2>
+    <h2>{{ period }} ／ {{ scname(scenario, labels) }}</h2>
     <div class="split" style="gap:14px">
       <span class="pill-total {{ 'ok' if ((total - 1)|abs) < 0.005 else 'warn' }}" id="totalPill">
         總和 <span id="totalVal">{{ '%.2f' % (total * 100) }}</span>%
@@ -98,7 +100,7 @@
 <section class="card">
   <header>
     <h2>由 Excel 匯入（一次設定 A／B／C）</h2>
-    <span class="hint">欄位：Shop / 店舖名稱 / A / B / C</span>
+    <span class="hint">欄位：Region / OM / Site / 店舖名稱 / A / B / C</span>
   </header>
   <div class="body">
     <form method="post" action="/admin/shares/import" enctype="multipart/form-data" class="row">

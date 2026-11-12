@@ -21,14 +21,14 @@
   {% for sc in scenarios %}
     {% if available_scenarios and sc in available_scenarios %}
     <a href="/run/{{ run.id }}/detail?scenario={{ sc }}{% if sku %}&sku={{ sku }}{% endif %}{% if only_need %}&only_need=1{% endif %}"
-       class="{{ 'active' if sc == scenario }}">{{ sc }} 餐</a>
+       class="{{ 'active' if sc == scenario }}">{{ scname(sc, labels) }}</a>
     {% endif %}
   {% endfor %}
 </div>
 
 <section class="card">
   <header>
-    <h2>{{ scenario }} 餐 ｜ {{ '單一 SKU 分店明細' if sku else '各店派貨總量' }}</h2>
+    <h2>{{ scname(scenario, labels) }} ｜ {{ '單一 SKU 分店明細' if sku else '各店派貨總量' }}</h2>
     <form method="get" action="/run/{{ run.id }}/detail" class="split" style="gap:8px">
       <input type="hidden" name="scenario" value="{{ scenario }}">
       <select class="input" name="sku" style="width:260px;padding:5px 9px">
@@ -36,7 +36,7 @@
         {% for s in skus %}
         <option value="{{ s.sku }}" {{ 'selected' if s.sku == sku }}>
           {{ s.sku }}{% if s.description %} · {{ s.description }}{% endif %}
-          {% if s.shortfall_qty %}（缺 {{ s.shortfall_qty }}）{% endif %}
+          {% if s.shortfall_qty %}（Target 欠 {{ s.shortfall_qty }}）{% endif %}
         </option>
         {% endfor %}
       </select>
@@ -51,11 +51,13 @@
     {% if sku and selected %}
       <div class="statbar">
         <div><div class="k">Target</div><div class="v">{{ selected.target_qty | num }}</div></div>
-        <div><div class="k">現有總庫存</div><div class="v">{{ selected.total_stock | num }}</div></div>
-        <div><div class="k">需派貨合計</div><div class="v">{{ selected.total_dispatch | num }}</div></div>
-        <div><div class="k">可調出合計</div><div class="v">{{ selected.surplus_qty | num }}</div></div>
-        <div><div class="k">虧欠</div>
-          <div class="v"><span class="badge {{ 'danger' if selected.shortfall_qty else 'ok' }}">{{ selected.shortfall_qty | num }} 件</span></div></div>
+        <div><div class="k">派貨目標</div><div class="v">{{ selected.dispatch_target | num }}</div></div>
+        <div><div class="k">店舖庫存</div><div class="v">{{ selected.total_stock | num }}</div></div>
+        <div><div class="k">在途</div><div class="v">{{ selected.total_pending | num }}</div></div>
+        <div><div class="k">倉存</div><div class="v">{{ selected.warehouse_qty | num }}</div></div>
+        <div><div class="k">需求 ／ 可派</div><div class="v">{{ selected.need_qty | num }} ／ {{ selected.total_dispatch | num }}</div></div>
+        <div><div class="k">缺貨</div>
+          <div class="v"><span class="badge {{ 'danger' if selected.short_qty else 'ok' }}">{{ selected.short_qty | num }}</span></div></div>
         <div><div class="k">MOQ</div><div class="v">{{ selected.moq }}</div></div>
       </div>
       <div class="table-wrap">
@@ -63,11 +65,16 @@
           <thead>
             <tr>
               <th>店舖</th>
+              {% if gate %}<th>RP Type</th>{% endif %}
               <th class="num">佔比</th>
               <th class="num">分配數量</th>
               <th class="num">現有庫存</th>
+              <th class="num">在途</th>
               <th class="num">差距</th>
-              <th class="num">需派貨</th>
+              <th class="num">需求</th>
+              <th class="num">可派</th>
+              <th class="num">缺貨</th>
+              <th class="num">日銷</th>
               <th class="num">可調出</th>
             </tr>
           </thead>
@@ -75,11 +82,30 @@
           {% for ln in lines %}
             <tr class="{{ 'is-short' if ln.dispatch_qty > 0 }}">
               <td class="mono strong">{{ ln.shop_code }}</td>
+              {% if gate %}
+              <td>
+                {% if ln.rp_type %}
+                  <span class="badge {{ 'ok' if ln.rp_type == 'RF' else 'neutral' }}">{{ ln.rp_type }}</span>
+                {% else %}<span class="dim">—</span>{% endif %}
+              </td>
+              {% endif %}
               <td class="num">{{ '%.2f%%' % (ln.share_pct * 100) }}</td>
               <td class="num">{{ ln.alloc_qty | num }}</td>
               <td class="num">{{ ln.stock_qty | num }}</td>
+              <td class="num">{{ ln.pending_qty | num }}</td>
               <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
-              <td class="num">{% if ln.dispatch_qty %}<span class="badge danger">{{ ln.dispatch_qty | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+              <td class="num">{{ ln.need_qty | num }}</td>
+              <td class="num">
+                {% if ln.dispatch_qty %}<span class="badge danger">{{ ln.dispatch_qty | num }}</span>
+                {% else %}<span class="dim">—</span>{% endif %}
+              </td>
+              <td class="num">
+                {% if ln.blocked %}
+                  <span class="badge warn" title="RP Type {{ ln.rp_type or '未提供' }}，依規則不派貨">RP 不派</span>
+                {% elif ln.short_qty %}<span class="badge danger">{{ ln.short_qty | num }}</span>
+                {% else %}<span class="dim">—</span>{% endif %}
+              </td>
+              <td class="num">{{ '%.1f' % ln.daily_rate }}</td>
               <td class="num">{% if ln.surplus_qty %}<span class="badge ok">{{ ln.surplus_qty | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
             </tr>
           {% endfor %}
@@ -87,15 +113,24 @@
           <tfoot>
             <tr style="background:var(--surface-2);font-weight:600">
               <td>合計</td>
+              {% if gate %}<td></td>{% endif %}
               <td class="num">{{ '%.2f%%' % (lines | sum(attribute='share_pct') * 100) }}</td>
               <td class="num">{{ lines | sum(attribute='alloc_qty') | num }}</td>
               <td class="num">{{ lines | sum(attribute='stock_qty') | num }}</td>
+              <td class="num">{{ lines | sum(attribute='pending_qty') | num }}</td>
               <td class="num"></td>
+              <td class="num">{{ lines | rejectattr('blocked') | sum(attribute='need_qty') | num }}</td>
               <td class="num">{{ lines | sum(attribute='dispatch_qty') | num }}</td>
+              <td class="num">{{ lines | sum(attribute='short_qty') | num }}</td>
+              <td class="num"></td>
               <td class="num">{{ lines | sum(attribute='surplus_qty') | num }}</td>
             </tr>
           </tfoot>
         </table>
+      </div>
+      <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+        「需求」是分配量減去現有庫存與在途後的缺口，按 MOQ 向上取整；「可派」受 D001 倉存限制，不足時按需求比例分配。
+        {% if gate %}{{ gate | join('、') }} 只有 RP Type = RF 才會派貨，ND 或未提供一律 0 件。{% endif %}
       </div>
     {% elif by_shop %}
       <div class="table-wrap">

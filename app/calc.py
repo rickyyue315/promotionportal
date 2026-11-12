@@ -24,16 +24,52 @@ For each SKU:
 Note that "enough" can be true while dispatch is non-zero: the goods exist, they
 are just in the wrong shops. That distinction is the whole point of the report,
 so it is modelled explicitly as ``coverage_status``.
+
+RP Type gate
+------------
+A few shops (currently HB87) cannot receive promotional stock unless the SKU's
+RP Type for that shop is ``RF``. When the RP Type is ``ND`` — or missing — the
+dispatch is forced to zero even though the shop may be short of its allocation.
+Shops outside the gate ignore RP Type entirely.
+
+The gate is applied *after* the normal dispatch is computed, so the report can
+still show how much *would* have been sent and why it was stopped, instead of
+silently reporting a zero.
+
+Days of cover
+-------------
+A promotion can run for weeks, but shops are only sent the first few days of
+stock (4 by default). ``PromoWindow`` scales the SKU target by
+``dispatch_days / promotion_days`` before it is split across shops:
+
+    dispatch_target = round(target × dispatch_days / promotion_days)
+    rate            = (last month sold + MTD sold) / days on record
+    expected_sales  = rate × promotion_days
+
+``days on record`` runs from the first of last month — or the launch date for a
+new product — to the as-of date, so a SKU launched five days ago is not diluted
+by a month of zeroes.
+
+Warehouse cap
+-------------
+What can actually be sent is limited by the warehouse (D001) net stock. When the
+sum of shop needs exceeds it, the available units are shared in proportion to
+need (largest remainder, whole MOQ steps) and the remainder is reported as
+shortage. Pending receipts at D001 are *not* counted: they are inbound to the
+warehouse and may never arrive within the promotion.
 """
 
 from __future__ import annotations
 
 import math
 from dataclasses import dataclass, field
+from datetime import date, timedelta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
 COVERAGE_SUFFICIENT = "sufficient"  # total shop stock covers the target
 COVERAGE_SHORT = "short"  # not enough goods anywhere
+
+RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
 
 
 @dataclass(frozen=True)
@@ -42,6 +78,42 @@ class SkuTarget:
     target_qty: int
     moq: int = 1
     description: str = ""
+
+
+@dataclass(frozen=True)
+class ShopSales:
+    """Sales and pipeline figures from one SKU × shop row of the stock file."""
+
+    last_month_sold: int = 0
+    mtd_sold: int = 0
+    pending_qty: int = 0
+    launch_date: Optional[date] = None
+
+
+@dataclass(frozen=True)
+class PromoWindow:
+    """The promotion period and how many days of stock are sent at a time."""
+
+    start: date
+    end: date
+    dispatch_days: int = 4
+
+    @property
+    def days(self) -> int:
+        return max((self.end - self.start).days + 1, 0)
+
+    @property
+    def effective_dispatch_days(self) -> int:
+        if self.days <= 0:
+            return 0
+        return max(1, min(self.dispatch_days, self.days))
+
+    def dispatch_target(self, target_qty: int) -> int:
+        """Target scaled down to the dispatch window, never below one unit."""
+        if target_qty <= 0 or self.days <= 0:
+            return max(target_qty, 0)
+        scaled = target_qty * self.effective_dispatch_days / self.days
+        return max(int(math.floor(scaled + 0.5)), 1)
 
 
 @dataclass(frozen=True)
@@ -54,6 +126,19 @@ class Line:
     gap_qty: int
     dispatch_qty: int
     surplus_qty: int
+    rp_type: str = ""
+    blocked: bool = False
+    blocked_qty: int = 0
+    pending_qty: int = 0
+    daily_rate: float = 0.0
+    expected_sales: int = 0
+    need_qty: int = 0
+    short_qty: int = 0
+
+    @property
+    def on_hand(self) -> int:
+        """Real stock plus what is already on its way to the shop."""
+        return self.stock_qty + self.pending_qty
 
 
 @dataclass(frozen=True)
@@ -69,6 +154,17 @@ class SkuSummary:
     n_shops_needing: int
     coverage_status: str
     moq: int
+    dispatch_target: int = 0
+    total_pending: int = 0
+    warehouse_qty: int = 0
+    warehouse_pending: int = 0
+    daily_rate: float = 0.0
+    expected_sales: int = 0
+    gap_target: int = 0
+    need_qty: int = 0
+    short_qty: int = 0
+    blocked_qty: int = 0
+    gap_supply: int = 0
 
     @property
     def enough(self) -> bool:
@@ -178,8 +274,98 @@ def round_up_to(qty: float, moq: float) -> int:
 
 
 # ---------------------------------------------------------------------------
-# scenario
+# sales rate
 # ---------------------------------------------------------------------------
+
+
+def sales_window_start(as_of: date, launch_date: Optional[date] = None) -> date:
+    """First day covered by the Last Month + MTD sales figures.
+
+    That is the first of last month, unless the SKU launched later — a product
+    launched last week must not be divided by six weeks of zeroes.
+    """
+    first_of_this_month = as_of.replace(day=1)
+    start = (first_of_this_month - timedelta(days=1)).replace(day=1)
+    if launch_date and launch_date > start:
+        return launch_date
+    return start
+
+
+def daily_sales_rate(sales: ShopSales, as_of: Optional[date]) -> float:
+    """Units sold per day at this shop, or 0 when there is nothing to go on."""
+    if as_of is None:
+        return 0.0
+    start = sales_window_start(as_of, sales.launch_date)
+    days = (as_of - start).days + 1
+    if days <= 0:
+        return 0.0
+    sold = max(sales.last_month_sold, 0) + max(sales.mtd_sold, 0)
+    return sold / days
+
+
+def dispatch_batches(promo: PromoWindow) -> List[Tuple[int, date, date]]:
+    """Split the promotion into consecutive dispatch runs.
+
+    Each run covers ``dispatch_days`` days of selling (the last one may be
+    shorter). These are the dates a shop is expected to be stocked for; the
+    warehouse still needs its own lead time, which we do not assume.
+    """
+    if promo.days <= 0:
+        return []
+    step = max(promo.effective_dispatch_days, 1)
+    out: List[Tuple[int, date, date]] = []
+    day = promo.start
+    index = 1
+    while day <= promo.end:
+        end = min(day + timedelta(days=step - 1), promo.end)
+        out.append((index, day, end))
+        day = end + timedelta(days=1)
+        index += 1
+    return out
+
+
+def cap_to_available(
+    needs: Sequence[int], available: int, moq: float = 1
+) -> List[int]:
+    """Share ``available`` units across ``needs``, in whole MOQ steps.
+
+    The scarce units go where the need is, in proportion, using the largest
+    remainder method. Nothing is handed out beyond a shop's own need, and the
+    result never exceeds ``available`` — a warehouse cannot send what it does
+    not have.
+    """
+    n = len(needs)
+    if n == 0:
+        return []
+    step = max(int(round(moq or 1)), 1)
+    total = sum(needs)
+    if total <= 0:
+        return [0] * n
+    if available >= total:
+        return list(needs)
+
+    steps_available = max(int(available), 0) // step
+    if steps_available <= 0:
+        return [0] * n
+
+    max_steps = [n_ // step for n_ in needs]
+    raw = [steps_available * need / total for need in needs]
+    out = [min(int(math.floor(x)), cap) for x, cap in zip(raw, max_steps)]
+
+    residual = steps_available - sum(out)
+    order = sorted(range(n), key=lambda i: (-(raw[i] - out[i]), i))
+    while residual > 0:
+        moved = False
+        for i in order:
+            if residual <= 0:
+                break
+            if out[i] < max_steps[i]:
+                out[i] += 1
+                residual -= 1
+                moved = True
+        if not moved:
+            break
+    return [o * step for o in out]
 
 
 def compute_scenario(
@@ -190,11 +376,42 @@ def compute_scenario(
     stock_by_sku: Dict[str, Dict[str, float]],
     share_total: float = 1.0,
     warnings: Optional[List[str]] = None,
+    rp_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
+    rp_gate_shops: Sequence[str] = (),
+    sales_by_sku: Optional[Dict[str, Dict[str, ShopSales]]] = None,
+    promo: Optional[PromoWindow] = None,
+    as_of: Optional[date] = None,
+    warehouse_by_sku: Optional[Dict[str, int]] = None,
+    warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
 ) -> ScenarioResult:
-    """Compute allocations and dispatch for one share set."""
+    """Compute allocations and dispatch for one share set.
+
+    ``promo`` scales the SKU target down to the dispatch window before it is
+    split by ``shares``. ``sales_by_sku`` supplies the sales history used for the
+    promotion-period comparison; pass ``None`` when the file has no sales
+    columns, and the comparison is simply left blank.
+
+    ``rp_gate_shops`` lists the shops where dispatch requires ``RP Type == RF``.
+    ``warehouse_by_sku`` is the warehouse net stock that actually limits how much
+    can be sent.
+    """
     warn = list(warnings or [])
     lines: List[Line] = []
     skus: List[SkuSummary] = []
+
+    gate = {str(s).strip().upper() for s in rp_gate_shops if str(s).strip()}
+    rp_map = rp_by_sku or {}
+    sales_map = sales_by_sku or {}
+    warehouse = warehouse_by_sku or {}
+    warehouse_pending = warehouse_pending_by_sku or {}
+    sales_known = sales_by_sku is not None and as_of is not None
+    promo_days = promo.days if promo else 0
+
+    blocked_skus: set = set()
+    blocked_units = 0
+    short_skus: set = set()
+    short_units = 0
+    missing_warehouse: List[str] = []
 
     known = set(shops)
     unknown_stock = sorted(
@@ -214,40 +431,136 @@ def compute_scenario(
 
     for target in targets:
         per_shop_stock = stock_by_sku.get(target.sku, {})
-        allocs = apportion(target.target_qty, shares)
+        per_shop_rp = rp_map.get(target.sku, {})
+        per_shop_sales = sales_map.get(target.sku, {})
+
+        # Only the first few days of the target are sent out; the rest is
+        # replenished later, so it must not inflate this round of dispatch.
+        dispatch_target = (
+            promo.dispatch_target(target.target_qty)
+            if promo is not None
+            else target.target_qty
+        )
+        allocs = apportion(dispatch_target, shares)
+
+        available = (
+            int(round(warehouse[target.sku]))
+            if warehouse_by_sku is not None and target.sku in warehouse
+            else None
+        )
+        if warehouse_by_sku is not None and available is None:
+            missing_warehouse.append(target.sku)
+
+        rows: List[dict] = []
+        for shop, share, alloc in zip(shops, shares, allocs):
+            stock = int(round(float(per_shop_stock.get(shop, 0) or 0)))
+            sales = per_shop_sales.get(shop) or ShopSales()
+            pending = int(sales.pending_qty or 0)
+            on_hand = stock + pending
+
+            gap = alloc - on_hand
+            need = round_up_to(gap, target.moq) if gap > 0 else 0
+
+            rate = daily_sales_rate(sales, as_of)
+            expected = int(round(rate * promo_days)) if sales_known else 0
+
+            rp_type = str(per_shop_rp.get(shop, "") or "").strip().upper()
+            gated = bool(gate) and shop.upper() in gate and rp_type != RP_DISPATCHABLE
+            blocked = gated and need > 0
+
+            rows.append(
+                {
+                    "shop": shop,
+                    "share": share,
+                    "alloc": alloc,
+                    "stock": stock,
+                    "pending": pending,
+                    "gap": gap,
+                    "need": need,
+                    "rate": rate,
+                    "expected": expected,
+                    "rp_type": rp_type,
+                    "blocked": blocked,
+                    "surplus": max(stock - alloc, 0),
+                }
+            )
+
+        candidates = [0 if r["blocked"] else r["need"] for r in rows]
+        if available is not None and sum(candidates) > available:
+            capped = cap_to_available(candidates, available, target.moq)
+        else:
+            capped = candidates
 
         total_stock = 0
+        total_pending = 0
         total_dispatch = 0
+        total_need = 0
+        total_blocked = 0
+        total_expected = 0
+        total_rate = 0.0
         surplus = 0
         needing = 0
 
-        for shop, share, alloc in zip(shops, shares, allocs):
-            stock = int(round(float(per_shop_stock.get(shop, 0) or 0)))
-            total_stock += stock
+        for row, dispatch in zip(rows, capped):
+            # A shop with no share, no stock, nothing in transit and no sales is
+            # pure noise in the detail sheet — every column would be zero.
+            # Keep the row when sales exist, because those units are real.
+            if (
+                row["share"] <= 0
+                and row["stock"] == 0
+                and row["pending"] == 0
+                and dispatch == 0
+                and row["rate"] <= 0
+            ):
+                continue
 
-            gap = alloc - stock
-            dispatch = round_up_to(gap, target.moq) if gap > 0 else 0
-            over = max(stock - alloc, 0)
-
+            total_stock += row["stock"]
+            total_pending += row["pending"]
             total_dispatch += dispatch
-            surplus += over
+            total_expected += row["expected"]
+            total_rate += row["rate"]
+            surplus += row["surplus"]
             if dispatch > 0:
                 needing += 1
+
+            if row["blocked"]:
+                # A gated shop's need is neither dispatched nor a warehouse
+                # shortage — the goods are there, the rule forbids sending them.
+                blocked_skus.add(target.sku)
+                blocked_units += row["need"]
+                total_blocked += row["need"]
+                short = 0
+            else:
+                total_need += row["need"]
+                short = row["need"] - dispatch
+                if short > 0:
+                    short_skus.add(target.sku)
+                    short_units += short
 
             lines.append(
                 Line(
                     sku=target.sku,
-                    shop_code=shop,
-                    share_pct=share,
-                    alloc_qty=alloc,
-                    stock_qty=stock,
-                    gap_qty=gap,
+                    shop_code=row["shop"],
+                    share_pct=row["share"],
+                    alloc_qty=row["alloc"],
+                    stock_qty=row["stock"],
+                    gap_qty=row["gap"],
                     dispatch_qty=dispatch,
-                    surplus_qty=over,
+                    surplus_qty=row["surplus"],
+                    rp_type=row["rp_type"],
+                    blocked=row["blocked"],
+                    blocked_qty=row["need"] if row["blocked"] else 0,
+                    pending_qty=row["pending"],
+                    daily_rate=round(row["rate"], 4),
+                    expected_sales=row["expected"],
+                    need_qty=row["need"],
+                    short_qty=short,
                 )
             )
 
-        shortfall = max(target.target_qty - total_stock, 0)
+        covered = total_stock + total_pending + (available or 0)
+        coverage_gap = max(target.target_qty - covered, 0)
+
         skus.append(
             SkuSummary(
                 sku=target.sku,
@@ -257,13 +570,44 @@ def compute_scenario(
                 total_stock=total_stock,
                 total_dispatch=total_dispatch,
                 surplus_qty=surplus,
-                shortfall_qty=shortfall,
+                shortfall_qty=coverage_gap,
                 n_shops_needing=needing,
                 coverage_status=(
-                    COVERAGE_SUFFICIENT if shortfall == 0 else COVERAGE_SHORT
+                    COVERAGE_SUFFICIENT if coverage_gap == 0 else COVERAGE_SHORT
                 ),
                 moq=int(round(target.moq or 1)),
+                dispatch_target=dispatch_target,
+                total_pending=total_pending,
+                warehouse_qty=available or 0,
+                warehouse_pending=int(warehouse_pending.get(target.sku, 0) or 0),
+                daily_rate=round(total_rate, 4),
+                expected_sales=total_expected if sales_known else 0,
+                gap_target=(
+                    target.target_qty - total_expected if sales_known else 0
+                ),
+                need_qty=total_need,
+                short_qty=total_need - total_dispatch,
+                blocked_qty=total_blocked,
+                gap_supply=target.target_qty - (total_stock + total_pending + total_dispatch),
             )
+        )
+
+    if blocked_skus:
+        warn.append(
+            "、".join(sorted(gate))
+            + f" 依 RP Type 規則不派貨：{len(blocked_skus)} 個 SKU，共少派 "
+            + f"{blocked_units:,} 件（只有 RP Type = {RP_DISPATCHABLE} 才派，"
+            + "ND 或未提供一律 0 件）"
+        )
+    if short_units:
+        warn.append(
+            f"貨倉存貨不足：{len(short_skus)} 個 SKU 共缺 {short_units:,} 件，"
+            "已按需求比例分配可派數量"
+        )
+    if missing_warehouse:
+        warn.append(
+            f"有 {len(missing_warehouse)} 個 SKU 在貨倉沒有存貨紀錄，"
+            "未套用倉存上限（例：" + missing_warehouse[0] + "）"
         )
 
     return ScenarioResult(
@@ -280,13 +624,33 @@ def compute_all_scenarios(
     shops: Sequence[str],
     targets: Sequence[SkuTarget],
     stock_by_sku: Dict[str, Dict[str, float]],
+    rp_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
+    rp_gate_shops: Sequence[str] = (),
+    sales_by_sku: Optional[Dict[str, Dict[str, ShopSales]]] = None,
+    promo: Optional[PromoWindow] = None,
+    as_of: Optional[date] = None,
+    warehouse_by_sku: Optional[Dict[str, int]] = None,
+    warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
 ) -> Dict[str, ScenarioResult]:
     """Compute every scenario from {scenario: {shop: pct}}."""
     out: Dict[str, ScenarioResult] = {}
     for name in sorted(scenarios):
         shares, total, warnings = normalise_shares(shops, scenarios[name])
         out[name] = compute_scenario(
-            name, shops, shares, targets, stock_by_sku, total, warnings
+            name,
+            shops,
+            shares,
+            targets,
+            stock_by_sku,
+            total,
+            warnings,
+            rp_by_sku=rp_by_sku,
+            rp_gate_shops=rp_gate_shops,
+            sales_by_sku=sales_by_sku,
+            promo=promo,
+            as_of=as_of,
+            warehouse_by_sku=warehouse_by_sku,
+            warehouse_pending_by_sku=warehouse_pending_by_sku,
         )
     return out
 

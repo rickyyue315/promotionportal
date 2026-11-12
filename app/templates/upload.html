@@ -5,7 +5,7 @@
 <div class="page-head">
   <div>
     <h1>新增計算</h1>
-    <div class="desc">上載 SKU Target 與店舖庫存，系統會一次算出 A／B／C 三個情境的派貨量與夠貨判斷。</div>
+    <div class="desc">上載 SKU Target 與店舖庫存，系統會一次算出已設定餐別的派貨量與夠貨判斷。</div>
   </div>
   <div class="actions">
     <form method="get" action="/run/new" style="display:flex;gap:8px">
@@ -20,23 +20,54 @@
 <div class="alert error">
   <span class="tag">不可計算</span>
   <span>
-    {{ period }} 的 A／B／C 佔比全部未設定，無法分配 Target。
+    {{ period }} 的餐別佔比全部未設定，無法分配 Target。
     {% if can_admin %}請先到<a href="/admin/shares?period={{ period }}">每月店舖佔比</a>設定。{% else %}請聯絡管理員。{% endif %}
   </span>
 </div>
-{% elif status.values() | selectattr('ready') | list | length < 3 %}
+{% elif missing %}
 <div class="alert warn">
   <span class="tag">部分就緒</span>
   <span>
     只有
     {% for sc in scenarios if status[sc].ready %}{{ sc }} {% endfor %}
-    已設定完成，其餘餐別會被略過。
+    已設定完成；{% for sc in missing %}{{ scname(sc, labels) }}{{ '、' if not loop.last }}{% endfor %}
+    尚未設定，會被略過。
   </span>
 </div>
 {% endif %}
 
 <form method="post" action="/run/new" enctype="multipart/form-data">
   <input type="hidden" name="period" value="{{ period }}">
+
+  <section class="card">
+    <header>
+      <h2>推廣期與派貨日數</h2>
+      <span class="hint">只派頭幾日貨，Target 會按日數縮小</span>
+    </header>
+    <div class="body">
+      <div class="row">
+        <div style="flex:1">
+          <label class="field"><span>推廣開始日期</span>
+            <input class="input" type="date" name="promo_start" id="promoStart"
+                   value="{{ promo_start }}" required>
+          </label>
+        </div>
+        <div style="flex:1">
+          <label class="field"><span>推廣完結日期</span>
+            <input class="input" type="date" name="promo_end" id="promoEnd"
+                   value="{{ promo_end }}" required>
+          </label>
+        </div>
+        <div style="flex:.7">
+          <label class="field"><span>每次派貨日數</span>
+            <input class="input" type="number" min="1" max="60" name="dispatch_days"
+                   id="dispatchDays" value="{{ dispatch_days }}" required>
+          </label>
+        </div>
+      </div>
+      <p class="dim" id="promoHint" style="font-size:12.5px;margin:0"></p>
+    </div>
+  </section>
 
   <section class="card">
     <header>
@@ -61,7 +92,8 @@
             <input class="file" type="file" name="stock_file" accept=".xlsx,.xls" required>
           </label>
           <p class="dim" style="font-size:12.5px;margin:0">
-            寬表（第一欄 SKU，每欄一店）或長表（SKU／店舖／數量）都可以。
+            寬表（第一欄 SKU，每欄一店）或長表（SKU／店舖／數量）都可以；
+            SAP 明細（Article／Site／SaSa Net Stock／RP Type）可直接上載。
             <a href="/run/template/stock">下載範本</a>
           </p>
         </div>
@@ -85,12 +117,17 @@
         {% for sc in scenarios %}
           {% set s = status[sc] %}
           <tr>
-            <td class="strong" style="width:80px">{{ sc }} 餐</td>
+            <td class="strong" style="width:150px">
+              {{ scname(sc, labels) }}
+              {% if s.optional %}<div><span class="badge neutral" style="margin-top:4px">非經常性</span></div>{% endif %}
+            </td>
             <td>
               {% if s.ready %}
                 <span class="badge ok">就緒</span>
               {% elif s.total %}
                 <span class="badge warn">總和 {{ '%.1f%%' % (s.total * 100) }}</span>
+              {% elif s.optional %}
+                <span class="badge neutral">本期不需要</span>
               {% else %}
                 <span class="badge danger">未設定</span>
               {% endif %}
@@ -106,10 +143,14 @@
   <section class="card">
     <header><h2>計算邏輯</h2></header>
     <div class="body" style="font-size:13px;color:var(--text-2)">
-      <p style="margin:0 0 10px"><strong>1. 拆 Target</strong>　按該餐的店舖佔比把 SKU Target 拆到每間店，用最大餘數法確保加起來剛好等於 Target。</p>
-      <p style="margin:0 0 10px"><strong>2. 算派貨</strong>　每店「分配數量 − 現有庫存」，正數就是需要派貨；有 MOQ 就向上取至倍數。</p>
-      <p style="margin:0 0 10px"><strong>3. 判斷夠貨</strong>　該 SKU 所有店舖庫存加總與 Target 比較，不足就是「不夠貨」，差額就是需要補的數量。</p>
-      <p style="margin:0"><strong>4. 注意</strong>　夠貨不等於不用派貨 —— 貨可能在錯的店，需要調撥。</p>
+      <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。</p>
+      <p style="margin:0 0 10px"><strong>2. 拆到店舖</strong>　按該餐的店舖佔比分配派貨目標，用最大餘數法確保加起來剛好等於派貨目標。</p>
+      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；有 MOQ 就向上取至倍數。</p>
+      {% if rp_gate_shops %}
+      <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
+      {% endif %}
+      <p style="margin:0 0 10px"><strong>4. 倉存上限</strong>　D001 只計 SaSa Net Stock；需求超過倉存時按比例分配，差額就是缺貨。</p>
+      <p style="margin:0"><strong>5. 銷售差距</strong>　日銷 =（上月銷量＋本月銷量）÷ 有紀錄日數（新產品由 Launch Date 起計）；用日銷 × 推廣日數與 Target、及與「庫存＋派貨」比較。</p>
     </div>
   </section>
 </div>
@@ -139,5 +180,31 @@
   </div>
 </section>
 {% endif %}
+
+<script>
+const startEl = document.getElementById('promoStart');
+const endEl = document.getElementById('promoEnd');
+const daysEl = document.getElementById('dispatchDays');
+const hintEl = document.getElementById('promoHint');
+
+function refreshPromo() {
+  if (!startEl.value || !endEl.value) {
+    hintEl.textContent = '請填寫推廣開始與完結日期。';
+    return;
+  }
+  const promoDays = Math.floor((new Date(endEl.value) - new Date(startEl.value)) / 86400000) + 1;
+  const want = Math.max(1, parseInt(daysEl.value || '0', 10));
+  if (promoDays <= 0) {
+    hintEl.textContent = '完結日期不可早於開始日期。';
+    return;
+  }
+  const eff = Math.min(want, promoDays);
+  const example = Math.max(1, Math.round(1400 * eff / promoDays));
+  hintEl.textContent = `推廣 ${promoDays} 日，每次派 ${eff} 日貨：派貨目標 = Target × ${eff}/${promoDays}`
+    + `（例如 Target 1,400 → ${example.toLocaleString()}）。`;
+}
+[startEl, endEl, daysEl].forEach(el => el.addEventListener('input', refreshPromo));
+refreshPromo();
+</script>
 
 {% endblock %}
