@@ -1,0 +1,143 @@
+{% extends "base.html" %}
+{% block title %}新增計算{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>新增計算</h1>
+    <div class="desc">上載 SKU Target 與店舖庫存，系統會一次算出 A／B／C 三個情境的派貨量與夠貨判斷。</div>
+  </div>
+  <div class="actions">
+    <form method="get" action="/run/new" style="display:flex;gap:8px">
+      <input class="input" name="period" value="{{ period }}" list="periods" style="width:130px">
+      <button class="btn" type="submit">切換期間</button>
+    </form>
+  </div>
+</div>
+<datalist id="periods">{% for p in periods %}<option value="{{ p }}">{% endfor %}</datalist>
+
+{% if not ready %}
+<div class="alert error">
+  <span class="tag">不可計算</span>
+  <span>
+    {{ period }} 的 A／B／C 佔比全部未設定，無法分配 Target。
+    {% if can_admin %}請先到<a href="/admin/shares?period={{ period }}">每月店舖佔比</a>設定。{% else %}請聯絡管理員。{% endif %}
+  </span>
+</div>
+{% elif status.values() | selectattr('ready') | list | length < 3 %}
+<div class="alert warn">
+  <span class="tag">部分就緒</span>
+  <span>
+    只有
+    {% for sc in scenarios if status[sc].ready %}{{ sc }} {% endfor %}
+    已設定完成，其餘餐別會被略過。
+  </span>
+</div>
+{% endif %}
+
+<form method="post" action="/run/new" enctype="multipart/form-data">
+  <input type="hidden" name="period" value="{{ period }}">
+
+  <section class="card">
+    <header>
+      <h2>兩個輸入檔案</h2>
+      <span class="hint">期間 {{ period }}</span>
+    </header>
+    <div class="body">
+      <div class="grid-2" style="gap:22px">
+        <div>
+          <label class="field">
+            <span>SKU × Target Qty</span>
+            <input class="file" type="file" name="target_file" accept=".xlsx,.xls" required>
+          </label>
+          <p class="dim" style="font-size:12.5px;margin:0">
+            需要 SKU 與 Target Qty 兩欄，MOQ 選填（派貨量會向上取至 MOQ 倍數）。
+            <a href="/run/template/target">下載範本</a>
+          </p>
+        </div>
+        <div>
+          <label class="field">
+            <span>SKU × 每店舖庫存</span>
+            <input class="file" type="file" name="stock_file" accept=".xlsx,.xls" required>
+          </label>
+          <p class="dim" style="font-size:12.5px;margin:0">
+            寬表（第一欄 SKU，每欄一店）或長表（SKU／店舖／數量）都可以。
+            <a href="/run/template/stock">下載範本</a>
+          </p>
+        </div>
+      </div>
+    </div>
+    <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
+      <span class="dim" style="font-size:12.5px">
+        計算只考慮推廣期內的派貨，不預測推廣期後的銷售。
+      </span>
+      <button class="btn primary" type="submit" {{ 'disabled' if not ready }}>開始計算</button>
+    </div>
+  </section>
+</form>
+
+<div class="grid-2">
+  <section class="card">
+    <header><h2>佔比狀態</h2><span class="hint">{{ period }}</span></header>
+    <div class="body flush">
+      <table class="tbl">
+        <tbody>
+        {% for sc in scenarios %}
+          {% set s = status[sc] %}
+          <tr>
+            <td class="strong" style="width:80px">{{ sc }} 餐</td>
+            <td>
+              {% if s.ready %}
+                <span class="badge ok">就緒</span>
+              {% elif s.total %}
+                <span class="badge warn">總和 {{ '%.1f%%' % (s.total * 100) }}</span>
+              {% else %}
+                <span class="badge danger">未設定</span>
+              {% endif %}
+            </td>
+            <td class="num dim">{{ s.n_shops }} / {{ s.n_expected }} 店</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>計算邏輯</h2></header>
+    <div class="body" style="font-size:13px;color:var(--text-2)">
+      <p style="margin:0 0 10px"><strong>1. 拆 Target</strong>　按該餐的店舖佔比把 SKU Target 拆到每間店，用最大餘數法確保加起來剛好等於 Target。</p>
+      <p style="margin:0 0 10px"><strong>2. 算派貨</strong>　每店「分配數量 − 現有庫存」，正數就是需要派貨；有 MOQ 就向上取至倍數。</p>
+      <p style="margin:0 0 10px"><strong>3. 判斷夠貨</strong>　該 SKU 所有店舖庫存加總與 Target 比較，不足就是「不夠貨」，差額就是需要補的數量。</p>
+      <p style="margin:0"><strong>4. 注意</strong>　夠貨不等於不用派貨 —— 貨可能在錯的店，需要調撥。</p>
+    </div>
+  </section>
+</div>
+
+{% if target_uploads or stock_uploads %}
+<section class="card">
+  <header><h2>最近上載的檔案</h2></header>
+  <div class="body flush">
+    <div class="table-wrap" style="max-height:320px">
+      <table class="tbl">
+        <thead>
+          <tr><th>類型</th><th>檔名</th><th class="num">筆數</th><th>上載時間</th><th>上載者</th></tr>
+        </thead>
+        <tbody>
+        {% for u in (target_uploads[:8] + stock_uploads[:8]) | sort(attribute='id', reverse=true) %}
+          <tr>
+            <td><span class="badge neutral">{{ 'Target' if u.kind == 'target' else '庫存' }}</span></td>
+            <td class="dim">{{ u.filename or '—' }}</td>
+            <td class="num">{{ u.n_rows | num }}</td>
+            <td class="dim nowrap">{{ u.uploaded_at | replace('T',' ') }}</td>
+            <td class="dim">{{ u.uploaded_by or '—' }}</td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+{% endif %}
+
+{% endblock %}

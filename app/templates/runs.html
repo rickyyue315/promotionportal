@@ -1,0 +1,72 @@
+{% extends "base.html" %}
+{% block title %}歷史批次{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>歷史批次</h1>
+    <div class="desc">每次計算都會保留當時的輸入、參數與結果，可隨時重看或重新匯出。</div>
+  </div>
+  <div class="actions">
+    <a class="btn primary" href="/run/new">新增計算</a>
+  </div>
+</div>
+
+<section class="card">
+  <div class="body flush">
+    {% if runs %}
+    <div class="table-wrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="width:60px">#</th>
+            <th style="width:100px">期間</th>
+            <th>計算時間</th>
+            <th>執行者</th>
+            <th class="num">SKU</th>
+            <th class="num">不夠貨</th>
+            <th style="width:210px"></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for r in runs %}
+          <tr>
+            <td class="mono dim">{{ r.id }}</td>
+            <td class="strong">{{ r.period }}</td>
+            <td class="dim nowrap">{{ r.created_at | replace('T',' ') }}</td>
+            <td class="dim">{{ r.created_by or '—' }}</td>
+            <td class="num">{{ r.n_sku }}</td>
+            <td class="num">
+              {% if r.n_short %}
+                <span class="badge danger">{{ r.n_short }}</span>
+              {% else %}
+                <span class="badge ok">0</span>
+              {% endif %}
+            </td>
+            <td class="num">
+              <a class="btn sm" href="/run/{{ r.id }}">結果</a>
+              <a class="btn sm" href="/run/{{ r.id }}/detail">明細</a>
+              <a class="btn sm" href="/run/{{ r.id }}/export.xlsx">Excel</a>
+              {% if is_admin %}
+              <form method="post" action="/run/{{ r.id }}/delete" style="display:inline"
+                    onsubmit="return confirm('刪除批次 #{{ r.id }}？此動作無法復原。')">
+                <button class="btn sm danger" type="submit">刪</button>
+              </form>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="big">還沒有任何批次</div>
+      先完成一次計算，之後每次的結果都會留在這裡。
+      <div style="margin-top:14px"><a class="btn primary" href="/run/new">新增計算</a></div>
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

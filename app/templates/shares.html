@@ -1,0 +1,156 @@
+{% extends "base.html" %}
+{% block title %}每月店舖佔比{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>每月店舖佔比</h1>
+    <div class="desc">每個月為 A／B／C 三個版本各自設定每間店舖的生意佔比，各版本分別要加起來等於 100%。</div>
+  </div>
+  <div class="actions">
+    <form method="get" action="/admin/shares" style="display:flex;gap:8px;align-items:center">
+      <input class="input" name="period" value="{{ period }}" list="periods" style="width:130px">
+      <input type="hidden" name="scenario" value="{{ scenario }}">
+      <button class="btn" type="submit">切換月份</button>
+    </form>
+    <a class="btn" href="/admin/shares/template?period={{ period }}">下載範本</a>
+  </div>
+</div>
+
+<datalist id="periods">
+  {% for p in periods %}<option value="{{ p }}">{% endfor %}
+</datalist>
+
+<div class="tabs">
+  {% for sc in scenarios %}
+    <a href="/admin/shares?period={{ period }}&scenario={{ sc }}"
+       class="{{ 'active' if sc == scenario }}">
+      {{ sc }} 餐
+      {% if status[sc].ready %}✓{% elif status[sc].total %}· {{ '%.1f%%' % (status[sc].total * 100) }}{% endif %}
+    </a>
+  {% endfor %}
+</div>
+
+{% if not shops %}
+<div class="alert warn">
+  <span class="tag">沒有店舖</span>
+  <span>店舖主檔是空的。你可以<a href="/admin/shops">手動新增</a>，或直接在下方匯入佔比 Excel，系統會自動建立店舖。</span>
+</div>
+{% endif %}
+
+<section class="card">
+  <header>
+    <h2>{{ period }} ／ {{ scenario }} 餐</h2>
+    <div class="split" style="gap:14px">
+      <span class="pill-total {{ 'ok' if ((total - 1)|abs) < 0.005 else 'warn' }}" id="totalPill">
+        總和 <span id="totalVal">{{ '%.2f' % (total * 100) }}</span>%
+      </span>
+      <button class="btn sm" type="button" onclick="copyFrom('A')">複製 A 餐</button>
+      <button class="btn sm" type="button" onclick="normalise()">自動調整至 100%</button>
+    </div>
+  </header>
+  <form method="post" action="/admin/shares" id="shareForm">
+    <input type="hidden" name="period" value="{{ period }}">
+    <input type="hidden" name="scenario" value="{{ scenario }}">
+    <input type="hidden" name="unit" value="pct">
+    <div class="body flush">
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th style="width:110px">店舖</th>
+              <th>名稱</th>
+              <th style="width:80px">地區</th>
+              <th class="num" style="width:120px">佔比 %</th>
+              <th class="num dim" style="width:120px">A 餐參考</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for shop in shops %}
+            {% set code = shop.code %}
+            <tr>
+              <td class="mono strong">{{ code }}</td>
+              <td class="dim">{{ shop.name or '—' }}</td>
+              <td class="dim">{{ shop.region }}</td>
+              <td class="num">
+                <input class="input pct-input" style="text-align:right"
+                       type="number" step="0.0001" min="0" max="100"
+                       name="pct_{{ code }}"
+                       data-a="{{ '%.4f' % (all_shares['A'].get(code, 0) * 100) }}"
+                       value="{{ '%.4f' % (current.get(code, 0) * 100) }}">
+              </td>
+              <td class="num dim">{{ '%.2f' % (all_shares['A'].get(code, 0) * 100) }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
+      <span class="dim" style="font-size:12.5px">
+        以百分比為單位填寫，例如 5.2746 代表 5.2746%。留空或 0 表示該店不參與分配。
+      </span>
+      <button class="btn primary" type="submit">儲存 {{ scenario }} 餐</button>
+    </div>
+  </form>
+</section>
+
+<section class="card">
+  <header>
+    <h2>由 Excel 匯入（一次設定 A／B／C）</h2>
+    <span class="hint">欄位：Shop / 店舖名稱 / A / B / C</span>
+  </header>
+  <div class="body">
+    <form method="post" action="/admin/shares/import" enctype="multipart/form-data" class="row">
+      <input type="hidden" name="period" value="{{ period }}">
+      <div style="flex:2">
+        <label class="field">
+          <span>佔比檔案</span>
+          <input class="file" type="file" name="file" accept=".xlsx,.xls" required>
+        </label>
+      </div>
+      <div style="flex:1;display:flex;align-items:flex-end">
+        <button class="btn primary" type="submit" style="margin-bottom:12px">匯入並覆寫</button>
+      </div>
+    </form>
+    <p class="dim" style="font-size:12.5px;margin:6px 0 0">
+      匯入會覆寫 {{ period }} 的三個版本。店舖代碼若不存在，會自動加入店舖主檔。
+      建議先按「下載範本」，填好後再上載。
+    </p>
+  </div>
+</section>
+
+<script>
+const inputs = [...document.querySelectorAll('.pct-input')];
+const totalVal = document.getElementById('totalVal');
+const totalPill = document.getElementById('totalPill');
+
+function currentTotal() {
+  return inputs.reduce((sum, el) => sum + (parseFloat(el.value) || 0), 0);
+}
+function refresh() {
+  const t = currentTotal();
+  totalVal.textContent = t.toFixed(2);
+  const ok = Math.abs(t - 100) < 0.005;
+  totalPill.classList.toggle('ok', ok);
+  totalPill.classList.toggle('warn', !ok);
+}
+inputs.forEach(el => el.addEventListener('input', refresh));
+
+function copyFrom(scenario) {
+  if (!confirm('用 A 餐的比例覆寫目前欄位？畫面上未儲存前都不會影響系統。')) return;
+  inputs.forEach(el => { el.value = el.dataset.a; });
+  refresh();
+}
+
+function normalise() {
+  let t = currentTotal();
+  if (t <= 0) { alert('目前全部是 0，沒有可放大的比例。'); return; }
+  inputs.forEach(el => {
+    el.value = ((parseFloat(el.value) || 0) * 100 / t).toFixed(4);
+  });
+  refresh();
+}
+refresh();
+</script>
+{% endblock %}

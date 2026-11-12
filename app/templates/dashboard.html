@@ -1,0 +1,161 @@
+{% extends "base.html" %}
+{% block title %}總覽{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>總覽</h1>
+    <div class="desc">目前期間 {{ period }} ｜ {{ n_shops }} 間啟用店舖</div>
+  </div>
+  <div class="actions">
+    {% if is_admin %}<a class="btn" href="/admin/shares?period={{ period }}">設定本月佔比</a>{% endif %}
+    <a class="btn primary" href="/run/new?period={{ period }}">新增計算</a>
+  </div>
+</div>
+
+{% if not ready_all %}
+<div class="alert warn">
+  <span class="tag">未就緒</span>
+  <span>
+    {{ period }} 的 A／B／C 佔比尚未全部設定完成，計算時只會跑已完成的餐別。
+    {% if is_admin %}請到「每月店舖佔比」補齊，或匯入佔比 Excel。{% else %}請聯絡管理員設定。{% endif %}
+  </span>
+</div>
+{% endif %}
+
+<div class="kpis">
+  <div class="kpi">
+    <div class="label">啟用店舖</div>
+    <div class="value">{{ n_shops }}<small>間</small></div>
+  </div>
+  <div class="kpi {{ 'ok' if ready_all else '' }}">
+    <div class="label">佔比就緒</div>
+    <div class="value">{{ status.values() | selectattr('ready') | list | length }}<small>/ 3 餐</small></div>
+  </div>
+  <div class="kpi">
+    <div class="label">最近批次 SKU</div>
+    <div class="value">{{ latest.n_sku if latest else '—' }}</div>
+  </div>
+  <div class="kpi {{ 'danger' if latest and latest.n_short }}">
+    <div class="label">最近批次不夠貨</div>
+    <div class="value">{{ latest.n_short if latest else '—' }}<small>個 SKU</small></div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <section class="card">
+    <header>
+      <h2>本月佔比狀態</h2>
+      <span class="hint">{{ period }}</span>
+    </header>
+    <div class="body flush">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th>餐別</th>
+            <th class="num">佔比總和</th>
+            <th class="num">已填店舖</th>
+            <th>最後更新</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for sc in scenarios %}
+          {% set s = status[sc] %}
+          <tr>
+            <td class="strong">{{ sc }} 餐</td>
+            <td class="num">
+              <span class="pill-total {{ 'ok' if s.ready else ('warn' if s.total else 'danger') }}">
+                {{ '%.2f%%' % (s.total * 100) }}
+              </span>
+            </td>
+            <td class="num">{{ s.n_shops }} / {{ s.n_expected }}</td>
+            <td class="dim" style="font-size:12px">
+              {% if s.updated_at %}{{ s.updated_at | replace('T', ' ') }}{% if s.updated_by %} · {{ s.updated_by }}{% endif %}{% else %}未設定{% endif %}
+            </td>
+            <td class="num">
+              {% if is_admin %}
+                <a class="btn sm" href="/admin/shares?period={{ period }}&scenario={{ sc }}">編輯</a>
+              {% endif %}
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>最近批次</h2></header>
+    <div class="body flush">
+      {% if latest %}
+      <table class="tbl">
+        <tbody>
+          <tr><td class="dim">期間</td><td class="strong">{{ latest.period }}</td></tr>
+          <tr><td class="dim">計算時間</td><td>{{ latest.created_at | replace('T', ' ') }}</td></tr>
+          <tr><td class="dim">執行者</td><td>{{ latest.created_by or '—' }}</td></tr>
+          {% for sc in scenarios %}
+            {% if latest_totals and latest_totals[sc] and latest_totals[sc].n_sku %}
+            <tr>
+              <td class="dim">{{ sc }} 餐</td>
+              <td>
+                需派 <span class="strong">{{ latest_totals[sc].total_dispatch | num }}</span> 件
+                <span class="dim">·</span>
+                不夠貨 <span class="strong" style="color:{{ '#b3392c' if latest_totals[sc].n_short else 'inherit' }}">{{ latest_totals[sc].n_short }}</span> 個 SKU
+              </td>
+            </tr>
+            {% endif %}
+          {% endfor %}
+        </tbody>
+      </table>
+      <div class="body" style="border-top:1px solid var(--border)">
+        <a class="btn" href="/run/{{ latest.id }}">查看結果</a>
+      </div>
+      {% else %}
+      <div class="empty">
+        <div class="big">還沒有計算紀錄</div>
+        上載 SKU Target 與店舖庫存，按一下就能得到 A／B／C 三個情境的派貨量。
+        <div style="margin-top:14px"><a class="btn primary" href="/run/new?period={{ period }}">開始第一次計算</a></div>
+      </div>
+      {% endif %}
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <header><h2>這個系統怎樣運作</h2></header>
+  <div class="body">
+    <div class="grid-2x2">
+      <div>
+        <h3 style="margin-bottom:6px">1 · 後台每月設定店舖佔比</h3>
+        <p class="dim" style="margin:0;font-size:13px">
+          每月更新每間店舖的生意佔比，可以同時準備 A／B／C 三個版本，
+          代表三種不同的鋪貨假設。每個版本各自要加起來等於 100%。
+        </p>
+      </div>
+      <div>
+        <h3 style="margin-bottom:6px">2 · 前台提供兩個檔案</h3>
+        <p class="dim" style="margin:0;font-size:13px">
+          一份 SKU × Target Qty，一份該批 SKU 的每店庫存。
+          庫存可以用寬表（每欄一店）或長表（SKU／店舖／數量），系統自動辨識。
+        </p>
+      </div>
+      <div>
+        <h3 style="margin-bottom:6px">3 · 系統拆數並判斷夠不夠貨</h3>
+        <p class="dim" style="margin:0;font-size:13px">
+          按佔比把 Target 拆到每間店，減去現有庫存得到需派貨量；
+          同時比較 SKU 的總庫存與總 Target，判斷是否需要補貨。
+        </p>
+      </div>
+      <div>
+        <h3 style="margin-bottom:6px">4 · 比較三個情境後匯出</h3>
+        <p class="dim" style="margin:0;font-size:13px">
+          A／B／C 並排比較，看哪個假設下缺貨最少、派貨最省。
+          需要時匯出 Excel 交給店舖或倉庫執行。
+        </p>
+      </div>
+    </div>
+  </div>
+</section>
+
+{% endblock %}

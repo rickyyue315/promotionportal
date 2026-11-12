@@ -1,0 +1,114 @@
+{% extends "base.html" %}
+{% block title %}店舖主檔{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>店舖主檔</h1>
+    <div class="desc">只有「啟用」的店舖會參與佔比分配與派貨計算。停用後歷史批次不受影響。</div>
+  </div>
+</div>
+
+<div class="grid-2">
+  <section class="card">
+    <header><h2>新增店舖</h2></header>
+    <div class="body">
+      <form method="post" action="/admin/shops" class="row">
+        <div style="flex:1">
+          <label class="field"><span>店舖代碼</span>
+            <input class="input" name="code" placeholder="HA19" required>
+          </label>
+        </div>
+        <div style="flex:1.4">
+          <label class="field"><span>名稱（可留空）</span>
+            <input class="input" name="name" placeholder="銅鑼灣店">
+          </label>
+        </div>
+        <div style="flex:.6">
+          <label class="field"><span>地區</span>
+            <select class="input" name="region">
+              <option value="HK">HK</option>
+              <option value="MO">MO</option>
+            </select>
+          </label>
+        </div>
+        <div style="flex:0 0 auto;display:flex;align-items:flex-end">
+          <button class="btn primary" type="submit" style="margin-bottom:12px">新增</button>
+        </div>
+      </form>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>批次匯入</h2></header>
+    <div class="body">
+      <p class="dim" style="margin:0 0 12px;font-size:13px">
+        最快的方式是直接在「每月店舖佔比」匯入佔比 Excel，系統會按 Shop 欄自動建立缺少的店舖。
+      </p>
+      <a class="btn" href="/admin/shares">前往佔比頁匯入</a>
+    </div>
+  </section>
+</div>
+
+<section class="card">
+  <header>
+    <h2>全部店舖</h2>
+    <span class="hint">{{ shops | length }} 間 ｜ 啟用 {{ shops | selectattr('active') | list | length }} 間</span>
+  </header>
+  <div class="body flush">
+    {% if shops %}
+    <div class="table-wrap">
+      <table class="tbl">
+        <thead>
+          <tr>
+            <th style="width:110px">代碼</th>
+            <th>名稱</th>
+            <th style="width:90px">地區</th>
+            <th style="width:100px">狀態</th>
+            <th style="width:170px"></th>
+          </tr>
+        </thead>
+        <tbody>
+        {% for shop in shops %}
+          <tr>
+            <td class="mono strong">{{ shop.code }}</td>
+            <td>
+              <input class="input" form="f{{ shop.id }}" name="name" value="{{ shop.name }}"
+                     placeholder="—" style="padding:5px 9px">
+            </td>
+            <td>
+              <select class="input" form="f{{ shop.id }}" name="region" style="padding:5px 9px">
+                <option value="HK" {{ 'selected' if shop.region == 'HK' }}>HK</option>
+                <option value="MO" {{ 'selected' if shop.region == 'MO' }}>MO</option>
+              </select>
+            </td>
+            <td>
+              <select class="input" form="f{{ shop.id }}" name="active" style="padding:5px 9px">
+                <option value="1" {{ 'selected' if shop.active }}>啟用</option>
+                <option value="0" {{ 'selected' if not shop.active }}>停用</option>
+              </select>
+            </td>
+            <td class="num">
+              <form id="f{{ shop.id }}" method="post" action="/admin/shops/{{ shop.id }}" style="display:inline">
+                <button class="btn sm" type="submit">儲存</button>
+              </form>
+              <form method="post" action="/admin/shops/{{ shop.id }}/delete" style="display:inline"
+                    onsubmit="return confirm('刪除店舖 {{ shop.code }}？歷史批次不會受影響。')">
+                <button class="btn sm danger" type="submit">刪除</button>
+              </form>
+            </td>
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+    {% else %}
+    <div class="empty">
+      <div class="big">還沒有店舖</div>
+      手動新增，或到「每月店舖佔比」匯入 Excel 一次建立。
+    </div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}

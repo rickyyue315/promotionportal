@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+{% block title %}計算結果{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>計算結果 · {{ run.period }}</h1>
+    <div class="desc">
+      批次 #{{ run.id }} ｜ {{ run.created_at | replace('T',' ') }} ｜ {{ run.created_by or '—' }}
+      ｜ {{ run.n_sku }} 個 SKU
+    </div>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/runs">回歷史</a>
+    <a class="btn primary" href="/run/{{ run.id }}/export.xlsx">匯出 Excel</a>
+  </div>
+</div>
+
+<div class="kpis">
+  <div class="kpi">
+    <div class="label">SKU 數</div>
+    <div class="value">{{ run.n_sku }}</div>
+  </div>
+  <div class="kpi {{ 'danger' if n_short_total else 'ok' }}">
+    <div class="label">不夠貨 SKU</div>
+    <div class="value">{{ n_short_total }}</div>
+  </div>
+  {% if best_dispatch %}
+  <div class="kpi">
+    <div class="label">派貨最省</div>
+    <div class="value">{{ best_dispatch }} 餐<small>{{ totals[best_dispatch].total_dispatch | num }} 件</small></div>
+  </div>
+  <div class="kpi {{ 'danger' if totals[best_dispatch].shortfall_qty }}">
+    <div class="label">虧欠合計</div>
+    <div class="value">{{ totals[best_dispatch].shortfall_qty | num }}<small>件 · 三情境相同</small></div>
+  </div>
+  {% endif %}
+</div>
+
+<div class="grid-2" style="grid-template-columns:repeat(auto-fit,minmax(240px,1fr))">
+  {% for sc in scenarios if totals[sc].n_sku %}
+  {% set t = totals[sc] %}
+  <section class="card">
+    <header>
+      <h2>{{ sc }} 餐</h2>
+      <span class="hint">佔比總和 {{ '%.2f%%' % ((share_totals.get(sc, 1)) * 100) }}</span>
+    </header>
+    <div class="body">
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">Target 總量</span><span class="num strong">{{ t.target_qty | num }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">現有總庫存</span><span class="num">{{ t.total_stock | num }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">需派貨合計</span><span class="num strong">{{ t.total_dispatch | num }}</span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0">
+        <span class="dim">虧欠 / 不夠貨</span>
+        <span class="num">
+          <span class="{{ 'badge danger' if t.shortfall_qty else 'badge ok' }}">{{ t.shortfall_qty | num }} 件</span>
+          <span class="dim" style="margin-left:6px">{{ t.n_short }} SKU</span>
+        </span>
+      </div>
+      <div style="margin-top:12px">
+        <a class="btn sm" href="/run/{{ run.id }}/detail?scenario={{ sc }}">看各店派貨</a>
+      </div>
+    </div>
+  </section>
+  {% endfor %}
+</div>
+
+{% set any_warn = warnings.values() | map('length') | sum %}
+{% if any_warn %}
+<section class="card">
+  <header><h2>資料提示</h2><span class="hint">{{ any_warn }} 條</span></header>
+  <div class="body" style="font-size:13px">
+    {% for sc, items in warnings.items() %}
+      {% for w in items %}
+      <div style="display:flex;gap:10px;padding:5px 0;border-bottom:1px solid #f4f4f0">
+        <span class="badge neutral" style="flex:0 0 auto">{{ sc }}</span>
+        <span style="color:var(--text-2)">{{ w }}</span>
+      </div>
+      {% endfor %}
+    {% endfor %}
+  </div>
+</section>
+{% endif %}
+
+<section class="card">
+  <header>
+    <h2>A／B／C 比較</h2>
+    <div class="split" style="gap:14px">
+      <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2);font-weight:400">
+        <input type="checkbox" id="onlyShort"> 只看不夠貨
+      </label>
+      <input class="input" id="skuFilter" placeholder="搜尋 SKU／名稱" style="width:180px;padding:5px 9px">
+    </div>
+  </header>
+  <div class="body flush">
+    <div class="table-wrap">
+      <table class="tbl" id="cmpTable">
+        <thead>
+          <tr>
+            <th rowspan="2">SKU</th>
+            <th rowspan="2">名稱</th>
+            <th class="num" rowspan="2">Target</th>
+            <th class="num" rowspan="2">現有庫存</th>
+            <th class="num" rowspan="2">虧欠</th>
+            {% for sc in scenarios if totals[sc].n_sku %}
+            <th class="num" colspan="2" style="text-align:center;border-left:1px solid var(--border)">{{ sc }} 餐</th>
+            {% endfor %}
+          </tr>
+          <tr>
+            {% for sc in scenarios if totals[sc].n_sku %}
+            <th class="num" style="border-left:1px solid var(--border)">派貨</th>
+            <th class="num">夠貨</th>
+            {% endfor %}
+          </tr>
+        </thead>
+        <tbody>
+        {% for row in rows %}
+          {% set short = row.shortfall_qty > 0 %}
+          <tr class="{{ 'is-short' if short }}" data-short="{{ 1 if short else 0 }}"
+              data-search="{{ (row.sku ~ ' ' ~ row.description) | lower }}">
+            <td class="mono">{{ row.sku }}</td>
+            <td class="dim">{{ row.description or '—' }}</td>
+            <td class="num">{{ row.target_qty | num }}</td>
+            <td class="num">{{ row.total_stock | num }}</td>
+            <td class="num">
+              {% if short %}<span class="badge danger">{{ row.shortfall_qty | num }}</span>
+              {% else %}<span class="dim">—</span>{% endif %}
+            </td>
+            {% for sc in scenarios if totals[sc].n_sku %}
+              {% set s = row.scenarios.get(sc) %}
+              <td class="num" style="border-left:1px solid #f0f0ec">{{ s.total_dispatch | num if s else '—' }}</td>
+              <td class="num">
+                {% if s %}
+                  <span class="badge {{ 'ok' if s.enough else 'danger' }}">{{ '是' if s.enough else '否' }}</span>
+                {% else %}—{% endif %}
+              </td>
+            {% endfor %}
+          </tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+  <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+    「夠貨」比較的是 SKU 的總庫存與 Target。顯示「否」代表即使把全公司庫存都調過來也不夠，需要補貨。
+    「派貨」是各店分配量減現有庫存後的缺口，會依 MOQ 向上取整。
+  </div>
+</section>
+
+<script>
+const onlyShort = document.getElementById('onlyShort');
+const skuFilter = document.getElementById('skuFilter');
+const rows = [...document.querySelectorAll('#cmpTable tbody tr')];
+
+function apply() {
+  const wantShort = onlyShort.checked;
+  const q = skuFilter.value.trim().toLowerCase();
+  rows.forEach(tr => {
+    const okShort = !wantShort || tr.dataset.short === '1';
+    const okText = !q || tr.dataset.search.includes(q);
+    tr.style.display = (okShort && okText) ? '' : 'none';
+  });
+}
+onlyShort.addEventListener('change', apply);
+skuFilter.addEventListener('input', apply);
+</script>
+
+{% endblock %}

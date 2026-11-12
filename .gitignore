@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+data/
+*.db
+*.db-wal
+*.db-shm
+tools/_shotdata/
+tools/_shots/
+tests/_data/
+.pytest_cache/
+.DS_Store

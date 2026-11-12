@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}派貨明細{% endblock %}
+{% block content %}
+
+<div class="page-head">
+  <div>
+    <h1>派貨明細</h1>
+    <div class="desc">
+      批次 #{{ run.id }} ｜ {{ run.period }}
+      {% if selected %}｜ {{ selected.sku }}{% if selected.description %} · {{ selected.description }}{% endif %}
+      {% endif %}
+    </div>
+  </div>
+  <div class="actions">
+    <a class="btn" href="/run/{{ run.id }}">回比較</a>
+    <a class="btn" href="/run/{{ run.id }}/export.xlsx">匯出 Excel</a>
+  </div>
+</div>
+
+<div class="tabs">
+  {% for sc in scenarios %}
+    {% if available_scenarios and sc in available_scenarios %}
+    <a href="/run/{{ run.id }}/detail?scenario={{ sc }}{% if sku %}&sku={{ sku }}{% endif %}{% if only_need %}&only_need=1{% endif %}"
+       class="{{ 'active' if sc == scenario }}">{{ sc }} 餐</a>
+    {% endif %}
+  {% endfor %}
+</div>
+
+<section class="card">
+  <header>
+    <h2>{{ scenario }} 餐 ｜ {{ '單一 SKU 分店明細' if sku else '各店派貨總量' }}</h2>
+    <form method="get" action="/run/{{ run.id }}/detail" class="split" style="gap:8px">
+      <input type="hidden" name="scenario" value="{{ scenario }}">
+      <select class="input" name="sku" style="width:260px;padding:5px 9px">
+        <option value="">— 全部 SKU 合計 —</option>
+        {% for s in skus %}
+        <option value="{{ s.sku }}" {{ 'selected' if s.sku == sku }}>
+          {{ s.sku }}{% if s.description %} · {{ s.description }}{% endif %}
+          {% if s.shortfall_qty %}（缺 {{ s.shortfall_qty }}）{% endif %}
+        </option>
+        {% endfor %}
+      </select>
+      <label style="display:flex;align-items:center;gap:6px;font-size:12.5px;white-space:nowrap">
+        <input type="checkbox" name="only_need" value="1" {{ 'checked' if only_need }}> 只看有派貨
+      </label>
+      <button class="btn sm" type="submit">查看</button>
+    </form>
+  </header>
+
+  <div class="body flush">
+    {% if sku and selected %}
+      <div class="statbar">
+        <div><div class="k">Target</div><div class="v">{{ selected.target_qty | num }}</div></div>
+        <div><div class="k">現有總庫存</div><div class="v">{{ selected.total_stock | num }}</div></div>
+        <div><div class="k">需派貨合計</div><div class="v">{{ selected.total_dispatch | num }}</div></div>
+        <div><div class="k">可調出合計</div><div class="v">{{ selected.surplus_qty | num }}</div></div>
+        <div><div class="k">虧欠</div>
+          <div class="v"><span class="badge {{ 'danger' if selected.shortfall_qty else 'ok' }}">{{ selected.shortfall_qty | num }} 件</span></div></div>
+        <div><div class="k">MOQ</div><div class="v">{{ selected.moq }}</div></div>
+      </div>
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>店舖</th>
+              <th class="num">佔比</th>
+              <th class="num">分配數量</th>
+              <th class="num">現有庫存</th>
+              <th class="num">差距</th>
+              <th class="num">需派貨</th>
+              <th class="num">可調出</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for ln in lines %}
+            <tr class="{{ 'is-short' if ln.dispatch_qty > 0 }}">
+              <td class="mono strong">{{ ln.shop_code }}</td>
+              <td class="num">{{ '%.2f%%' % (ln.share_pct * 100) }}</td>
+              <td class="num">{{ ln.alloc_qty | num }}</td>
+              <td class="num">{{ ln.stock_qty | num }}</td>
+              <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
+              <td class="num">{% if ln.dispatch_qty %}<span class="badge danger">{{ ln.dispatch_qty | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+              <td class="num">{% if ln.surplus_qty %}<span class="badge ok">{{ ln.surplus_qty | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+          <tfoot>
+            <tr style="background:var(--surface-2);font-weight:600">
+              <td>合計</td>
+              <td class="num">{{ '%.2f%%' % (lines | sum(attribute='share_pct') * 100) }}</td>
+              <td class="num">{{ lines | sum(attribute='alloc_qty') | num }}</td>
+              <td class="num">{{ lines | sum(attribute='stock_qty') | num }}</td>
+              <td class="num"></td>
+              <td class="num">{{ lines | sum(attribute='dispatch_qty') | num }}</td>
+              <td class="num">{{ lines | sum(attribute='surplus_qty') | num }}</td>
+            </tr>
+          </tfoot>
+        </table>
+      </div>
+    {% elif by_shop %}
+      <div class="table-wrap">
+        <table class="tbl">
+          <thead>
+            <tr>
+              <th>店舖</th>
+              <th class="num">分配數量合計</th>
+              <th class="num">現有庫存合計</th>
+              <th class="num">需派貨合計</th>
+              <th class="num">可調出合計</th>
+              <th class="num">有派貨 SKU</th>
+            </tr>
+          </thead>
+          <tbody>
+          {% for r in by_shop %}
+            <tr class="{{ 'is-short' if r.dispatch > 0 }}">
+              <td class="mono strong">{{ r.shop_code }}</td>
+              <td class="num">{{ r.alloc | num }}</td>
+              <td class="num">{{ r.stock | num }}</td>
+              <td class="num">{% if r.dispatch %}<span class="badge danger">{{ r.dispatch | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+              <td class="num">{{ r.surplus | num }}</td>
+              <td class="num dim">{{ r.n_sku }}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <div class="empty">
+        <div class="big">沒有符合條件的資料</div>
+        試試取消「只看有派貨」，或選擇其他餐別。
+      </div>
+    {% endif %}
+  </div>
+</section>
+
+{% endblock %}
