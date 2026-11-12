@@ -1,0 +1,6 @@
+# Deploy target is Linux (Railway) — keep line endings LF in the repo so that
+# Procfile / shell scripts are not broken by CRLF on checkout.
+* text=auto eol=lf
+
+*.xlsx binary
+*.XLSX binary
