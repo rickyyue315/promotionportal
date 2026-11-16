@@ -111,6 +111,29 @@ h3 { font-size: 14px; }
 .page-head .desc { color: var(--muted); font-size: 13px; margin-top: 4px; }
 .actions { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
 
+/* Month picker in the page head: the visible label is what tells people this
+   is the "which month" control rather than a search box. */
+.period-pick { display: flex; align-items: center; gap: 8px; }
+.period-pick > label {
+  font-size: 12.5px; color: var(--muted); white-space: nowrap; font-weight: 500;
+}
+.period-pick > .input { width: 155px; }
+
+/* Months that already hold share data, one click away. */
+.period-strip {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin: -6px 0 14px; font-size: 12.5px; color: var(--muted);
+}
+.period-strip a {
+  padding: 3px 10px; border: 1px solid var(--border); border-radius: 999px;
+  background: var(--surface); color: var(--text-2);
+}
+.period-strip a:hover { border-color: var(--border-strong); text-decoration: none; }
+.period-strip a.on {
+  border-color: var(--accent); background: var(--accent-soft);
+  color: var(--accent); font-weight: 600;
+}
+
 /* ---------- card ---------- */
 .card {
   background: var(--surface);

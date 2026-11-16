@@ -8,13 +8,13 @@
     <div class="desc">上載 SKU Target 與店舖庫存，系統會一次算出已設定餐別的派貨量與夠貨判斷。</div>
   </div>
   <div class="actions">
-    <form method="get" action="/run/new" style="display:flex;gap:8px">
-      <input class="input" name="period" value="{{ period }}" list="periods" style="width:130px">
-      <button class="btn" type="submit">切換期間</button>
+    <form method="get" action="/run/new" class="period-pick">
+      <label for="periodPick">計算月份</label>
+      <input class="input" type="month" id="periodPick" name="period" value="{{ period }}">
+      <button class="btn" type="submit">切換</button>
     </form>
   </div>
 </div>
-<datalist id="periods">{% for p in periods %}<option value="{{ p }}">{% endfor %}</datalist>
 
 {% if not ready %}
 <div class="alert error">
@@ -83,7 +83,7 @@
   <section class="card">
     <header>
       <h2>兩個輸入檔案</h2>
-      <span class="hint">期間 {{ period }}</span>
+      <span class="hint">用 <strong>{{ period }}</strong> 的 A／B／C 佔比分配</span>
     </header>
     <div class="body">
       <div class="grid-2" style="gap:22px">

@@ -8,19 +8,26 @@
     <div class="desc">每個月為 A／B／C 三個版本各自設定每間店舖的生意佔比，各版本分別要加起來等於 100%。</div>
   </div>
   <div class="actions">
-    <form method="get" action="/admin/shares" style="display:flex;gap:8px;align-items:center">
-      <input class="input" name="period" value="{{ period }}" list="periods" style="width:130px">
+    <form method="get" action="/admin/shares" class="period-pick">
+      <label for="periodPick">月份</label>
+      <input class="input" type="month" id="periodPick" name="period" value="{{ period }}">
       <input type="hidden" name="scenario" value="{{ scenario }}">
-      <button class="btn" type="submit">切換月份</button>
+      <button class="btn" type="submit">切換</button>
     </form>
     <a class="btn" href="/admin/shares/template?period={{ period }}">下載範本</a>
     <a class="btn" href="/admin/settings">餐別名稱／規則</a>
   </div>
 </div>
 
-<datalist id="periods">
-  {% for p in periods %}<option value="{{ p }}">{% endfor %}
-</datalist>
+{% if recorded %}
+<div class="period-strip">
+  <span>已有紀錄</span>
+  {% for p in recorded %}
+    <a class="{{ 'on' if p == period }}"
+       href="/admin/shares?period={{ p }}&scenario={{ scenario }}">{{ p }}</a>
+  {% endfor %}
+</div>
+{% endif %}
 
 {% if storage.ephemeral %}
 <div class="alert error">
@@ -115,8 +122,15 @@
     <span class="hint">欄位：Region / OM / Site / 店舖名稱 / A / B / C</span>
   </header>
   <div class="body">
-    <form method="post" action="/admin/shares/import" enctype="multipart/form-data" class="row">
-      <input type="hidden" name="period" value="{{ period }}">
+    <form method="post" action="/admin/shares/import" enctype="multipart/form-data"
+          class="row" id="importForm">
+      <div style="flex:0 0 180px">
+        <label class="field">
+          <span>匯入到哪個月</span>
+          <input class="input" type="month" name="period" id="importPeriod"
+                 value="{{ period }}" required>
+        </label>
+      </div>
       <div style="flex:2">
         <label class="field">
           <span>佔比檔案</span>
@@ -128,7 +142,8 @@
       </div>
     </form>
     <p class="dim" style="font-size:12.5px;margin:6px 0 0">
-      匯入會覆寫 {{ period }} 的三個版本。店舖代碼若不存在，會自動加入店舖主檔。
+      佔比檔案沒有月份欄，匯入到哪個月只看上面的「匯入到哪個月」；
+      匯入會覆寫 <strong id="importTarget">{{ period }}</strong> 的三個版本。店舖代碼若不存在，會自動加入店舖主檔。
       建議先按「下載範本」，填好後再上載。
     </p>
   </div>
@@ -166,5 +181,28 @@ function normalise() {
   refresh();
 }
 refresh();
+
+// The share file has no month column: where it lands is decided by the month
+// field in the import card. Repeat the choice in the note, and ask before
+// overwriting a month other than the one currently on screen.
+const importPeriod = document.getElementById('importPeriod');
+const importTarget = document.getElementById('importTarget');
+const importForm = document.getElementById('importForm');
+const pagePeriod = '{{ period }}';
+
+function refreshImportMonth() {
+  importTarget.textContent = importPeriod.value || '（未選月份）';
+}
+importPeriod.addEventListener('input', refreshImportMonth);
+
+importForm.addEventListener('submit', ev => {
+  if (importPeriod.value && importPeriod.value !== pagePeriod) {
+    const ok = confirm(
+      '你正在匯入到 ' + importPeriod.value + '，但畫面看的是 ' + pagePeriod + '。\n' +
+      '確定要把這個檔案寫進 ' + importPeriod.value + '？'
+    );
+    if (!ok) ev.preventDefault();
+  }
+});
 </script>
 {% endblock %}

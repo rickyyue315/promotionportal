@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tempfile
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
@@ -90,6 +91,29 @@ def _parse_date(value: str) -> Optional[date]:
         except ValueError:
             continue
     return None
+
+
+def _period(text: str) -> str:
+    """Normalise a month to ``YYYY-MM``, or "" when it is not a month.
+
+    The month pickers post ``YYYY-MM``, but links, old bookmarks and people
+    typing by hand may carry ``2026/11``, ``202611`` or a full date. Returning
+    "" lets the caller fall back (page) or refuse (a write) instead of quietly
+    creating a junk row in the share table.
+    """
+    raw = (text or "").strip().replace("/", "-").replace(".", "-")
+    if not raw:
+        return ""
+    match = re.fullmatch(r"(\d{4})-?(\d{1,2})(?:-\d{1,2})?", raw)
+    if not match:
+        return ""
+    year, month = int(match.group(1)), int(match.group(2))
+    if not 2000 <= year <= 2100 or not 1 <= month <= 12:
+        return ""
+    return f"{year:04d}-{month:02d}"
+
+
+BAD_PERIOD = "月份的格式應為 YYYY-MM，例如 2026-11。"
 
 
 @app.exception_handler(auth.AuthRequired)
@@ -345,7 +369,7 @@ def backup_db(request: Request):
 @app.get("/admin/shares", response_class=HTMLResponse)
 def shares_page(request: Request, period: str = "", scenario: str = "A"):
     auth.require_admin(request)
-    period = period or db.current_period()
+    period = _period(period) or db.current_period()
     scenario = scenario if scenario in db.SCENARIOS else "A"
     shops = db.list_shops(active_only=True)
     current = db.get_shares(period, scenario)
@@ -362,7 +386,7 @@ def shares_page(request: Request, period: str = "", scenario: str = "A"):
         all_shares=db.get_all_shares(period),
         status=status,
         total=total,
-        periods=_period_options(period),
+        recorded=db.list_periods()[:12],
         storage=db.storage_status(),
     )
 
@@ -371,7 +395,9 @@ def shares_page(request: Request, period: str = "", scenario: str = "A"):
 async def shares_save(request: Request):
     auth.require_admin(request)
     form = await request.form()
-    period = str(form.get("period", db.current_period()))
+    period = _period(str(form.get("period", "")))
+    if not period:
+        return back("/admin/shares", BAD_PERIOD, "error")
     scenario = str(form.get("scenario", "A"))
     unit = str(form.get("unit", "pct"))
     user = (auth.current_user(request) or {}).get("name", "")
@@ -406,6 +432,9 @@ async def shares_import(
     file: UploadFile = File(...),
 ):
     auth.require_admin(request)
+    period = _period(period)
+    if not period:
+        return back("/admin/shares", BAD_PERIOD, "error")
     data = await file.read()
     parsed = excel_io.parse_share_file(data)
 
@@ -442,7 +471,7 @@ async def shares_import(
     db.save_shares_bulk(period, parsed.by_scenario, user)
 
     parts = [f"{sc} {len(p)} 間店舖" for sc, p in parsed.by_scenario.items()]
-    msg = f"已匯入 {period}：" + "、".join(parts)
+    msg = f"已匯入到 {period}：" + "、".join(parts)
     if created:
         msg += f"；同時新增 {created} 間店舖"
     if parsed.warnings:
@@ -453,25 +482,11 @@ async def shares_import(
 @app.get("/admin/shares/template")
 def shares_template(request: Request, period: str = ""):
     auth.require_admin(request)
-    period = period or db.current_period()
+    period = _period(period) or db.current_period()
     shops = [dict(s) for s in db.list_shops(active_only=True)]
     existing = db.get_all_shares(period)
     data = excel_io.export_share_template(shops, existing, period)
     return _xlsx(data, f"店舖佔比_{period}.xlsx")
-
-
-def _period_options(selected: str, back_months: int = 6) -> List[str]:
-    options = set(db.list_periods())
-    today = datetime.now(db.APP_TZ)
-    year, month = today.year, today.month
-    for _ in range(back_months):
-        options.add(f"{year:04d}-{month:02d}")
-        month -= 1
-        if month == 0:
-            month, year = 12, year - 1
-    if selected:
-        options.add(selected)
-    return sorted(options, reverse=True)
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +497,7 @@ def _period_options(selected: str, back_months: int = 6) -> List[str]:
 @app.get("/run/new", response_class=HTMLResponse)
 def run_new_page(request: Request, period: str = ""):
     user = auth.require_user(request)
-    period = period or db.current_period()
+    period = _period(period) or db.current_period()
     status = db.share_status(period)
     required = [sc for sc in db.SCENARIOS if not status[sc]["optional"]]
     today = db.today()
@@ -497,7 +512,6 @@ def run_new_page(request: Request, period: str = ""):
         promo_start=today.isoformat(),
         promo_end=(today + timedelta(days=13)).isoformat(),
         dispatch_days=4,
-        periods=_period_options(period),
         can_admin=auth.is_admin(user),
     )
 
@@ -559,6 +573,7 @@ async def run_create(
     user = auth.require_user(request)
     name = user.get("name", "")
 
+    period = _period(period) or db.current_period()
     status = db.share_status(period)
     ready = [sc for sc in db.SCENARIOS if status[sc]["ready"]]
     if not ready:

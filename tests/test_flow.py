@@ -293,6 +293,79 @@ def test_share_import_reads_region_and_om(client):
     assert shops["MO01"]["region"] == "MO"
 
 
+def test_period_is_normalised_to_year_month():
+    from app.main import _period
+
+    assert _period("2026-11") == "2026-11"
+    assert _period("2026/1") == "2026-01"
+    assert _period("202611") == "2026-11"
+    assert _period("2026-11-16") == "2026-11"
+    assert _period(" 2026-11 ") == "2026-11"
+    for junk in ("", "Nov", "2026", "2026-13", "2026-00", "11/2026"):
+        assert _period(junk) == "", junk
+
+
+def test_shares_page_has_a_month_picker_and_an_import_month(client):
+    """The month is a visible choice: page picker plus the import card's own."""
+    login(client, "adminpw", "Ricky")
+    html = client.get("/admin/shares?period=2026-11").text
+
+    assert 'type="month"' in html
+    assert 'id="periodPick"' in html
+    assert 'id="importPeriod"' in html
+    assert "value=\"2026-11\"" in html
+
+    # Months that already hold data are one click away.
+    assert 'href="/admin/shares?period=2026-11&scenario=A"' in html
+
+
+def _share_file_bytes(shop: str, pct: float) -> bytes:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Region", "OM", "Site", "店舖名稱", "A", "B", "C"])
+    ws.append(["HK", "", shop, shop, pct, pct, pct])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_share_import_lands_in_the_month_that_was_picked(client):
+    from app import db
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/admin/shares/import",
+        data={"period": "2026/12"},
+        files={"file": ("shares.xlsx", _share_file_bytes("HA19", 1.0))},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "level=error" not in resp.headers["location"], resp.headers["location"]
+    assert "2026-12" in resp.headers["location"]
+
+    # Stored under the canonical month, never under the typed variant.
+    assert db.get_shares("2026-12", "A")["HA19"] == 1.0
+    assert "2026/12" not in db.list_periods()
+
+
+def test_share_import_refuses_a_month_that_is_not_a_month(client):
+    from app import db
+
+    login(client, "adminpw", "Ricky")
+    before = db.list_periods()
+    resp = client.post(
+        "/admin/shares/import",
+        data={"period": "Nov"},
+        files={"file": ("shares.xlsx", _share_file_bytes("HA19", 1.0))},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "level=error" in resp.headers["location"], resp.headers["location"]
+    assert db.list_periods() == before
+
+
 def _sap_stock_bytes(rows) -> bytes:
     """A miniature SAP export: the wide header set is the point of the test."""
     from openpyxl import Workbook
