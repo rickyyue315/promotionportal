@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import io
 import os
+import tempfile
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -149,7 +150,18 @@ def logout():
 def health():
     # Unauthenticated on purpose: Railway's healthcheck and a quick deploy
     # verification both need it, and it exposes nothing but build metadata.
-    return {"ok": True, "time": db.now(), **version.as_dict()}
+    # The storage fields are what a redeploy check needs: same path before and
+    # after means the database is on the volume, not on throwaway disk.
+    store = db.storage_status()
+    return {
+        "ok": True,
+        "time": db.now(),
+        **version.as_dict(),
+        "data_dir": store["path"],
+        "data_source": store["source"],
+        "persistent": not store["ephemeral"],
+        "n_periods": store["n_periods"],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -188,6 +200,7 @@ def dashboard(request: Request):
         n_ready=sum(1 for sc in required if status[sc]["ready"]),
         missing=[sc for sc in required if not status[sc]["ready"]],
         ready_all=all(status[sc]["ready"] for sc in required),
+        storage=db.storage_status(),
     )
 
 
@@ -253,6 +266,7 @@ def settings_page(request: Request):
         gate_raw=db.get_setting(db.RP_GATE_KEY, db.DEFAULT_RP_GATE),
         warehouse_raw=db.get_setting(db.WAREHOUSE_KEY, db.DEFAULT_WAREHOUSE),
         shop_codes={s["code"] for s in db.list_shops()},
+        storage=db.storage_status(),
     )
 
 
@@ -297,6 +311,27 @@ async def settings_save(request: Request):
     return back("/admin/settings", "；".join(notes), level)
 
 
+@app.get("/admin/backup/db")
+def backup_db(request: Request):
+    """Download the whole database.
+
+    Shares live in the same SQLite file as shops, uploads and runs, so one file
+    is the complete backup — and the only thing that helps if a deploy ever
+    starts from an empty disk again.
+    """
+    auth.require_admin(request)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    with tempfile.TemporaryDirectory() as tmp:
+        payload = db.backup_to(Path(tmp) / "portal.db").read_bytes()
+    return Response(
+        payload,
+        media_type="application/octet-stream",
+        headers={
+            "Content-Disposition": f'attachment; filename="portal_backup_{stamp}.db"'
+        },
+    )
+
+
 # ---------------------------------------------------------------------------
 # shares (admin)
 # ---------------------------------------------------------------------------
@@ -323,6 +358,7 @@ def shares_page(request: Request, period: str = "", scenario: str = "A"):
         status=status,
         total=total,
         periods=_period_options(period),
+        storage=db.storage_status(),
     )
 
 

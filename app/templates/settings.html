@@ -122,4 +122,76 @@
   </section>
 </form>
 
+<section class="card">
+  <header>
+    <h2>資料儲存</h2>
+    <span class="hint">佔比、批次、上載紀錄都在同一個資料庫</span>
+  </header>
+  <div class="body flush">
+    <table class="tbl">
+      <tbody>
+        <tr>
+          <td class="dim" style="width:170px">資料庫檔案</td>
+          <td class="mono">{{ storage.path }}</td>
+        </tr>
+        <tr>
+          <td class="dim">位置來源</td>
+          <td>
+            {% if storage.source == 'DATA_DIR' %}
+              環境變數 <span class="mono">DATA_DIR</span>
+            {% elif storage.source == 'volume' %}
+              Railway Volume（<span class="mono">RAILWAY_VOLUME_MOUNT_PATH</span>）
+            {% else %}
+              預設 <span class="mono">./data</span>（容器本機）
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="dim">重新部署後</td>
+          <td>
+            {% if storage.ephemeral %}
+              <span class="pill-total danger">會清空</span>
+              <span class="dim" style="margin-left:8px">沒有 volume 掛在這個路徑，新容器會由空白資料庫開始。</span>
+            {% elif storage.volume_backed %}
+              <span class="pill-total ok">保留</span>
+              <span class="dim" style="margin-left:8px">檔案在 volume <span class="mono" style="word-break:break-all">{{ storage.volume_path }}</span> 之內。</span>
+            {% else %}
+              <span class="pill-total ok">保留</span>
+              <span class="dim" style="margin-left:8px">不在 Railway 容器內（本機或其他主機的磁碟）。</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="dim">已儲存佔比</td>
+          <td>
+            {{ storage.n_periods }} 個月份 · {{ storage.n_share_sets }} 組餐別
+            {% if storage.last_share_update %}
+              <span class="dim">（最後更新 {{ storage.last_share_update | replace('T', ' ') }}）</span>
+            {% endif %}
+          </td>
+        </tr>
+        <tr>
+          <td class="dim">檔案大小</td>
+          <td>{{ '%.1f KB' % (storage.size_bytes / 1024) if storage.size_bytes else '尚未建立' }}</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="body">
+    <div class="alert {{ 'error' if storage.ephemeral else 'info' }}" style="margin:0 0 12px">
+      <span class="tag">{{ '要注意' if storage.ephemeral else '備份' }}</span>
+      <span>
+        {% if storage.ephemeral %}
+          這個資料庫在容器本機，<strong>下次部署會清空</strong>。到 Railway → 這個 service →
+          <span class="mono">New Volume</span>，mount path 填 <span class="mono">/data</span> 後重新部署；
+          本程式會自動改用 volume 路徑，不必再手動設 <span class="mono">DATA_DIR</span>。
+        {% else %}
+          要搬機或做大改動前，先下載一份備份。檔案已包含店舖、每月佔比、上載與批次結果。
+        {% endif %}
+      </span>
+    </div>
+    <a class="btn" href="/admin/backup/db">下載資料庫備份</a>
+  </div>
+</section>
+
 {% endblock %}

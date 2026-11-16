@@ -1,12 +1,22 @@
 """SQLite data layer.
 
 One file on disk, no server. On Railway the file lives on a mounted volume so it
-survives redeploys — set ``DATA_DIR`` to the mount path.
+survives redeploys.
+
+Where the file lives, in order of preference:
+
+1. ``DATA_DIR`` when set explicitly;
+2. ``RAILWAY_VOLUME_MOUNT_PATH`` — Railway publishes this as soon as a volume is
+   attached, so attaching a volume is enough. Relying on people to also set
+   ``DATA_DIR`` was a silent data-loss trap: without it every deploy started
+   from an empty database and the saved shares simply vanished;
+3. ``./data`` — fine locally, throwaway inside a container.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
 import re
 import sqlite3
@@ -14,6 +24,8 @@ from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+
+log = logging.getLogger("portal.db")
 
 SCENARIOS = ("A", "B", "C")
 
@@ -33,7 +45,27 @@ DEFAULT_SCENARIO_SETTINGS: Dict[str, Dict[str, Any]] = {
     "C": {"label": "", "remark": "", "optional": 1},
 }
 
-DATA_DIR = Path(os.environ.get("DATA_DIR", "./data"))
+DATA_DIR_SOURCES = ("DATA_DIR", "volume", "default")
+
+
+def resolve_data_dir() -> Tuple[Path, str]:
+    """``(directory, why)`` — where portal.db should live and who decided it.
+
+    Kept as a function so the fallback order can be tested without reloading the
+    module, and so a deploy can be reasoned about without reading the code.
+    """
+    explicit = os.environ.get("DATA_DIR", "").strip()
+    if explicit:
+        return Path(explicit).expanduser(), "DATA_DIR"
+
+    volume = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    if volume:
+        return Path(volume).expanduser(), "volume"
+
+    return Path("./data"), "default"
+
+
+DATA_DIR, DATA_DIR_SOURCE = resolve_data_dir()
 DB_PATH = DATA_DIR / "portal.db"
 
 SCHEMA = """
@@ -205,6 +237,9 @@ def init_db() -> None:
         conn.executescript(SCHEMA)
         _migrate(conn)
         _seed_settings(conn)
+    # Printed once per boot: the deploy log then answers "did this container
+    # write to the volume or to its own throwaway disk?" without guessing.
+    log.warning("SQLite: %s (source=%s)", DB_PATH.resolve(), DATA_DIR_SOURCE)
 
 
 # Columns added after the first deployments. CREATE TABLE IF NOT EXISTS never
@@ -527,6 +562,93 @@ def share_status(period: str) -> Dict[str, Dict[str, Any]]:
             "remark": settings[scenario]["remark"],
         }
     return out
+
+
+# ---------------------------------------------------------------------------
+# storage: where the data lives and whether it survives a deploy
+# ---------------------------------------------------------------------------
+
+_RAILWAY_ENV_KEYS = (
+    "RAILWAY_ENVIRONMENT_NAME",
+    "RAILWAY_PROJECT_ID",
+    "RAILWAY_SERVICE_ID",
+    "RAILWAY_VOLUME_MOUNT_PATH",
+)
+
+
+def _railway_volume() -> Optional[Path]:
+    raw = os.environ.get("RAILWAY_VOLUME_MOUNT_PATH", "").strip()
+    return Path(raw).expanduser() if raw else None
+
+
+def _inside(path: Path, parent: Path) -> bool:
+    try:
+        return path.resolve().is_relative_to(parent.resolve())
+    except (OSError, ValueError):
+        return False
+
+
+def storage_status() -> Dict[str, Any]:
+    """Enough truth to answer "why did my shares disappear?" from the screen.
+
+    ``ephemeral`` is the one that matters: a Railway container with no volume
+    behind the database file loses everything on the next deploy.
+    """
+    path = DB_PATH
+    volume = _railway_volume()
+    on_railway = any(os.environ.get(k) for k in _RAILWAY_ENV_KEYS)
+    volume_backed = bool(volume) and _inside(path, volume)
+
+    info: Dict[str, Any] = {
+        "path": str(path.resolve()),
+        "source": DATA_DIR_SOURCE,
+        "on_railway": on_railway,
+        "volume_path": str(volume) if volume else "",
+        "volume_backed": volume_backed,
+        "ephemeral": on_railway and not volume_backed,
+        "exists": False,
+        "size_bytes": 0,
+        "n_share_sets": 0,
+        "n_periods": 0,
+        "last_share_update": "",
+    }
+
+    try:
+        if path.exists():
+            info["exists"] = True
+            info["size_bytes"] = path.stat().st_size
+    except OSError:
+        pass
+
+    try:
+        with db() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS n, COUNT(DISTINCT period) AS p, "
+                "COALESCE(MAX(updated_at), '') AS last FROM share_set"
+            ).fetchone()
+        info["n_share_sets"] = int(row["n"] or 0)
+        info["n_periods"] = int(row["p"] or 0)
+        info["last_share_update"] = row["last"] or ""
+    except sqlite3.Error:
+        pass
+
+    return info
+
+
+def backup_to(dest: Path) -> Path:
+    """Consistent copy of the live database, WAL included.
+
+    ``sqlite3.Connection.backup`` is used instead of copying the file so a
+    backup taken mid-write is still valid.
+    """
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    target = sqlite3.connect(dest)
+    try:
+        with db() as conn:
+            conn.backup(target)
+    finally:
+        target.close()
+    return dest
 
 
 # ---------------------------------------------------------------------------

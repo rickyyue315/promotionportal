@@ -56,12 +56,12 @@ uvicorn app.main:app --reload --port 8000
 側欄左下角、登入頁底部、`/health` 顯示同一組版本資訊：
 
 ```
-v1.1.0 · a8636a9
+v1.2.0 · a8636a9
 ```
 
 | 部分 | 意思 | 從哪來 |
 |------|------|--------|
-| `1.1.0` | 功能版本 | `app/version.py` 的 `APP_VERSION`，發布時人手遞增 |
+| `1.2.0` | 功能版本 | `app/version.py` 的 `APP_VERSION`，發布時人手遞增 |
 | `a8636a9` | 正在跑的程式碼 commit | Railway 的 `RAILWAY_GIT_COMMIT_SHA`；本機讀 `.git` |
 | 啟動時間 | 這個進程何時啟動（容器部署約等於部署時間） | 載入時記下，只在 `/health` 與滑鼠懸停提示顯示 |
 
@@ -73,9 +73,13 @@ v1.1.0 · a8636a9
 
 ```bash
 curl -s https://<你的網域>/health
-# {"ok":true,"time":"2026-11-16T11:58:03","version":"1.1.0",
-#  "released_at":"2026-11-16","commit":"a8636a9","started_at":"2026-11-16 11:58"}
+# {"ok":true,"time":"2026-11-16T12:20:00","version":"1.2.0",
+#  "released_at":"2026-11-16","commit":"873d2c8","started_at":"2026-11-16 12:18",
+#  "data_dir":"/data/portal.db","data_source":"volume","persistent":true,"n_periods":1}
 ```
+
+`persistent` 是 false 就代表資料庫在容器暫存碟，重新部署會清空 —— 先掛 volume。
+`n_periods` 是資料庫內有佔比紀錄的月份數；重新部署後這個數字不變，就證明資料真的留下來了。
 
 ### 發布時要改的三件事
 
@@ -87,6 +91,7 @@ curl -s https://<你的網域>/health
 
 | 版本 | 日期 | 內容 |
 |------|------|------|
+| 1.2.0 | 2026-11-16 | 自動使用 Railway volume 路徑；介面顯示資料庫位置與「重新部署是否會清空」；可下載資料庫備份 |
 | 1.1.0 | 2026-11-16 | MOQ 改由店舖庫存檔讀取；介面與 `/health` 顯示版本號 |
 | 1.0.0 | 2026-11-12 | 初版：A／B／C 佔比拆分、派貨與夠貨判斷、Excel 匯出 |
 
@@ -104,6 +109,10 @@ Railway 的容器是拋棄式的，沒有 volume 的話每次重新部署 SQLite
 2. Mount path 填 **`/data`**
 3. 掛到這個 service
 
+掛好之後 Railway 會設定 `RAILWAY_VOLUME_MOUNT_PATH=/data`，程式（v1.2.0 起）會**自動**把資料庫放進去，
+不需要再設 `DATA_DIR`。之前的版本只認 `DATA_DIR`，忘了設就等於每次部署都開一個空白資料庫，
+在外面看來就是「佔比紀錄消失了」。
+
 ### 2. 設定環境變數
 
 Service → **Variables**：
@@ -113,8 +122,22 @@ Service → **Variables**：
 | `SECRET_KEY` | 一串長隨機字元 | 簽 cookie 用，外洩等於可偽造登入 |
 | `ADMIN_PASSWORD` | 你決定 | 後台：店舖、佔比 |
 | `USER_PASSWORD` | 你決定 | 前台：上載、計算、匯出 |
-| `DATA_DIR` | `/data` | SQLite 存放位置，必須對應 volume |
+| `DATA_DIR` | 選填，通常不用設 | 只在 volume 不在 `/data` 時才需要用來覆寫；有設就一定以它為準 |
 | `COOKIE_SECURE` | `1` | 強制 HTTPS cookie；本機測試才設 0 |
+
+### 佔比／批次不見了？
+
+先看「餐別與規則 → 資料儲存」那一頁（管理員可見），或 `curl /health` 看 `persistent`：
+
+| 畫面顯示 | 意思是 | 怎樣修 |
+|----------|--------|--------|
+| 會清空 · `persistent: false` | 資料庫在容器暫存碟，每次部署都歸零 | 掛 volume（mount path `/data`），重新部署 |
+| 保留 · `data_source: volume` | 資料庫在 volume 內，部署後仍在 | 不用處理 |
+| 佔比頁切換月份後有數字 | 紀錄其實還在，只是預設顯示當月 | 用「切換月份」找回舊月份 |
+
+資料寫入時會按「月份 + 餐別」存一次完整快照（`share_set` / `share_entry`），
+儲存本身就是刪掉舊月份再寫入新月份，所以修正佔比不會產生重複紀錄。
+搬機或大改動前，可以先在「資料儲存」按「下載資料庫備份」取一份 `.db`。
 
 產生隨機字串：
 

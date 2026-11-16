@@ -25,6 +25,19 @@
 </div>
 {% endif %}
 
+{% if storage.ephemeral and is_admin %}
+<div class="alert error">
+  <span class="tag">重新部署會清空</span>
+  <span>
+    佔比、批次與上載紀錄全部存在 <span class="mono">{{ storage.path }}</span>，
+    但這個位置在容器本機，<strong>下次部署會由空白資料庫重新開始</strong>。
+    請到 Railway 為此 service 掛一個 Volume（mount path <span class="mono">/data</span>），
+    重新部署後這一條警告會消失，代表資料已改存到 volume。
+    詳見<a href="/admin/settings">餐別與規則 → 資料儲存</a>。
+  </span>
+</div>
+{% endif %}
+
 <div class="kpis">
   <div class="kpi">
     <div class="label">啟用店舖</div>

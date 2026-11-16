@@ -22,6 +22,17 @@
   {% for p in periods %}<option value="{{ p }}">{% endfor %}
 </datalist>
 
+{% if storage.ephemeral %}
+<div class="alert error">
+  <span class="tag">會清空</span>
+  <span>
+    佔比確實有儲存（<span class="mono">{{ storage.path }}</span>），但這個位置在容器本機，
+    下次部署會由空白資料庫重新開始。請先掛 Railway Volume（mount path <span class="mono">/data</span>），
+    再重新輸入或匯入一次佔比。
+  </span>
+</div>
+{% endif %}
+
 <div class="tabs">
   {% for sc in scenarios %}
     <a href="/admin/shares?period={{ period }}&scenario={{ sc }}"
@@ -91,6 +102,7 @@
     <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
       <span class="dim" style="font-size:12.5px">
         以百分比為單位填寫，例如 5.2746 代表 5.2746%。留空或 0 表示該店不參與分配。
+        佔比按「月份 + 餐別」存進資料庫，切換月份不會互相覆蓋；目前共 {{ storage.n_periods }} 個月份有紀錄。
       </span>
       <button class="btn primary" type="submit">儲存 {{ scenario }} 餐</button>
     </div>
