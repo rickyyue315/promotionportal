@@ -131,6 +131,36 @@ def test_store_drops_the_oldest_when_full():
     runstore.clear()
 
 
+def test_results_live_for_half_an_hour():
+    """Long enough to read and export, short enough not to hold the data.
+
+    A finished calculation is a look-at-it-now artefact: the Excel is the
+    deliverable. Keeping parsed stock in memory for hours only makes the
+    container heavier for nobody's benefit, so the window is pinned at 30
+    minutes and the UI copy is derived from the same constant.
+    """
+    import time
+
+    assert runstore.TTL_SECONDS == 30 * 60
+
+    runstore.clear()
+    fresh = runstore.put("2028-03", db.now(), "tester", {}, {})
+    assert runstore.get(fresh.id) is not None
+
+    stale = runstore.put("2028-03", db.now(), "tester", {}, {})
+    runstore._STORE[stale.id] = (time.time() - runstore.TTL_SECONDS - 1, stale)
+    assert runstore.get(stale.id) is None
+    runstore.clear()
+
+
+def test_expiry_messages_quote_the_configured_minutes(client):
+    _login(client)
+    page = client.get("/runs")
+    assert page.status_code == 200
+    assert f"{runstore.TTL_SECONDS // 60} 分鐘" in page.text
+    assert "120 分鐘" not in page.text
+
+
 def test_timestamps_are_hong_kong_wall_clock():
     """A Railway container is UTC; the people reading the log are in Hong Kong."""
     from datetime import datetime, timedelta

@@ -7,7 +7,9 @@ shops and export the Excel they need. Nothing is written to disk.
 The practical effects, all deliberate:
 
 * a redeploy builds a new container, so any open result is gone;
-* results expire after ``TTL_SECONDS`` of wall-clock time;
+* results expire after ``TTL_SECONDS`` of wall-clock time — half an hour, long
+  enough to read the result and download the Excel, short enough that a
+  forgotten tab does not keep a whole month of parsed stock sitting in memory;
 * only the most recent ``MAX_RUNS`` are kept, so a long session cannot grow the
   process without bound.
 
@@ -25,7 +27,9 @@ from typing import Any, Dict, Optional
 
 from . import calc
 
-TTL_SECONDS = 2 * 60 * 60
+# A result is something you read now and print now. Half an hour covers that
+# and lets the parsed stock go early, instead of a forgotten tab holding it.
+TTL_SECONDS = 30 * 60
 MAX_RUNS = 6
 
 
