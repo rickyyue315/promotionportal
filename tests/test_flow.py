@@ -1,6 +1,7 @@
 """End-to-end flow: login → import shares → upload → compute → export."""
 
 import io
+import json
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -292,9 +293,9 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
-    ws.append(["111058302001", "面膜", 100, 1])
-    ws.append(["111058302002", "精華", 100, 1])
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "面膜", 100])
+    ws.append(["111058302002", "精華", 100])
     buf = io.BytesIO()
     wb.save(buf)
 
@@ -352,6 +353,99 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
     assert "RP Type" in result.text
 
 
+def test_moq_comes_from_the_stock_file_not_the_target(client):
+    """MOQ is a SKU property on the stock row; one in the target file is ignored."""
+    period = "2027-03"
+    sku = "111058302301"
+    db.upsert_shop("HA19", "HA19 門市", "HK")
+    db.save_shares(period, "A", {"HA19": 1.0}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    # An old template still carrying MOQ: it must not win over the stock file.
+    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
+    ws.append([sku, "面膜", 100, 99])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "店舖", "庫存", "MOQ"])
+    ws.append([sku, "HA19", 0, 12])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+
+    row = db.get_run_skus(run_id, "A")[0]
+    assert row["moq"] == 12                     # from the stock file, not 99
+    assert row["need_qty"] == 108               # ceil(100 / 12) × 12
+    assert row["total_dispatch"] == 108
+
+    params = json.loads(db.get_run(run_id)["params_json"])
+    assert params["has_moq"] is True
+    warnings = " ".join(params["warnings"]["A"])
+    assert "已忽略" in warnings and "MOQ" in warnings
+
+
+def test_stock_file_without_moq_does_not_round(client):
+    """No MOQ column: the need is exactly the gap, and the run says so."""
+    period = "2027-04"
+    sku = "111058302401"
+    db.upsert_shop("HA21", "HA21 門市", "HK")
+    db.save_shares(period, "A", {"HA21": 1.0}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "Target Qty"])
+    ws.append([sku, 100])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "店舖", "庫存"])
+    ws.append([sku, "HA21", 40])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+
+    row = db.get_run_skus(run_id, "A")[0]
+    assert row["moq"] == 1
+    assert row["need_qty"] == 60
+
+    params = json.loads(db.get_run(run_id)["params_json"])
+    assert params["has_moq"] is False
+    assert any("沒有 MOQ 欄位" in w for w in params["warnings"]["A"])
+
+
 def _sap_full_bytes(rows):
     """A SAP export with the full column set the real file carries."""
     from openpyxl import Workbook
@@ -385,9 +479,9 @@ def test_sap_file_drives_warehouse_cap_and_sales(client):
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
-    ws.append([sku_a, "面膜", 1400, 1])
-    ws.append([sku_new, "新精華", 1400, 1])
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku_a, "面膜", 1400])
+    ws.append([sku_new, "新精華", 1400])
     target = io.BytesIO()
     wb.save(target)
 

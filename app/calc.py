@@ -13,6 +13,12 @@ For each shop:
     gap      = alloc - stock             (how much this shop is short)
     dispatch = ceil(gap / MOQ) × MOQ     (what actually gets sent, if gap > 0)
 
+MOQ is a property of the SKU on the stock side, not of the target: the buyer
+sets a target quantity, the warehouse file (SAP) says how the SKU is packed.
+So ``compute_scenario`` takes ``moq_by_sku`` and never reads a MOQ off
+``SkuTarget``. A SKU with no MOQ — or a stock file without the column — is
+treated as 1, i.e. quantities are not rounded at all.
+
 For each SKU:
 
     total_stock = Σ stock
@@ -76,7 +82,6 @@ RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
 class SkuTarget:
     sku: str
     target_qty: int
-    moq: int = 1
     description: str = ""
 
 
@@ -273,6 +278,21 @@ def round_up_to(qty: float, moq: float) -> int:
     return int(math.ceil(qty / step) * step)
 
 
+def sku_moq(moq_by_sku: Optional[Dict[str, int]], sku: str) -> int:
+    """The MOQ to apply to one SKU, taken from the stock file.
+
+    Missing, blank or unparseable values all mean "no minimum" rather than an
+    error: a stock file without a MOQ column must still produce a report.
+    """
+    if not moq_by_sku:
+        return 1
+    try:
+        value = int(round(float(moq_by_sku.get(sku, 1) or 1)))
+    except (TypeError, ValueError):
+        return 1
+    return max(value, 1)
+
+
 # ---------------------------------------------------------------------------
 # sales rate
 # ---------------------------------------------------------------------------
@@ -383,6 +403,7 @@ def compute_scenario(
     as_of: Optional[date] = None,
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
+    moq_by_sku: Optional[Dict[str, int]] = None,
 ) -> ScenarioResult:
     """Compute allocations and dispatch for one share set.
 
@@ -393,7 +414,8 @@ def compute_scenario(
 
     ``rp_gate_shops`` lists the shops where dispatch requires ``RP Type == RF``.
     ``warehouse_by_sku`` is the warehouse net stock that actually limits how much
-    can be sent.
+    can be sent. ``moq_by_sku`` comes from the stock file (SKU × shop): it is
+    what rounds each shop's need up, and the target file has no say in it.
     """
     warn = list(warnings or [])
     lines: List[Line] = []
@@ -433,6 +455,7 @@ def compute_scenario(
         per_shop_stock = stock_by_sku.get(target.sku, {})
         per_shop_rp = rp_map.get(target.sku, {})
         per_shop_sales = sales_map.get(target.sku, {})
+        moq = sku_moq(moq_by_sku, target.sku)
 
         # Only the first few days of the target are sent out; the rest is
         # replenished later, so it must not inflate this round of dispatch.
@@ -459,7 +482,7 @@ def compute_scenario(
             on_hand = stock + pending
 
             gap = alloc - on_hand
-            need = round_up_to(gap, target.moq) if gap > 0 else 0
+            need = round_up_to(gap, moq) if gap > 0 else 0
 
             rate = daily_sales_rate(sales, as_of)
             expected = int(round(rate * promo_days)) if sales_known else 0
@@ -487,7 +510,7 @@ def compute_scenario(
 
         candidates = [0 if r["blocked"] else r["need"] for r in rows]
         if available is not None and sum(candidates) > available:
-            capped = cap_to_available(candidates, available, target.moq)
+            capped = cap_to_available(candidates, available, moq)
         else:
             capped = candidates
 
@@ -575,7 +598,7 @@ def compute_scenario(
                 coverage_status=(
                     COVERAGE_SUFFICIENT if coverage_gap == 0 else COVERAGE_SHORT
                 ),
-                moq=int(round(target.moq or 1)),
+                moq=moq,
                 dispatch_target=dispatch_target,
                 total_pending=total_pending,
                 warehouse_qty=available or 0,
@@ -631,6 +654,7 @@ def compute_all_scenarios(
     as_of: Optional[date] = None,
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
+    moq_by_sku: Optional[Dict[str, int]] = None,
 ) -> Dict[str, ScenarioResult]:
     """Compute every scenario from {scenario: {shop: pct}}."""
     out: Dict[str, ScenarioResult] = {}
@@ -651,6 +675,7 @@ def compute_all_scenarios(
             as_of=as_of,
             warehouse_by_sku=warehouse_by_sku,
             warehouse_pending_by_sku=warehouse_pending_by_sku,
+            moq_by_sku=moq_by_sku,
         )
     return out
 

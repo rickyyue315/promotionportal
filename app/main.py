@@ -520,8 +520,8 @@ async def run_create(
         return back("/run/new", "上載檔案有問題 — " + " ｜ ".join(problems), "error")
 
     targets = [
-        calc.SkuTarget(sku=sku, target_qty=qty, moq=moq, description=desc)
-        for sku, desc, qty, moq in parsed_t.rows
+        calc.SkuTarget(sku=sku, target_qty=qty, description=desc)
+        for sku, desc, qty in parsed_t.rows
     ]
 
     # The warehouse holds stock but never receives an allocation; its net stock
@@ -533,8 +533,19 @@ async def run_create(
     sales_by_sku: Dict[str, Dict[str, calc.ShopSales]] = {}
     warehouse_by_sku: Dict[str, int] = {}
     warehouse_pending: Dict[str, int] = {}
+    # MOQ is a SKU property carried on the stock file; when shops disagree the
+    # largest wins (never under-order) and the conflict is reported.
+    moq_by_sku: Dict[str, int] = {}
+    moq_conflict: set = set()
 
     for row in parsed_s.rows:
+        if row.moq > 1:
+            prev = moq_by_sku.get(row.sku)
+            if prev is None:
+                moq_by_sku[row.sku] = row.moq
+            elif prev != row.moq:
+                moq_conflict.add(row.sku)
+                moq_by_sku[row.sku] = max(prev, row.moq)
         if row.shop in warehouse_codes:
             warehouse_by_sku[row.sku] = warehouse_by_sku.get(row.sku, 0) + row.qty
             warehouse_pending[row.sku] = (
@@ -582,6 +593,7 @@ async def run_create(
         as_of=date.today(),
         warehouse_by_sku=warehouse_by_sku if has_warehouse else None,
         warehouse_pending_by_sku=warehouse_pending,
+        moq_by_sku=moq_by_sku,
     )
 
     gate_set = set(gate)
@@ -606,6 +618,24 @@ async def run_create(
         for res in results.values():
             res.warnings.append(
                 "庫存檔沒有 Last Month Sold Qty／MTD Sold Qty，未計算推廣期預計銷量與銷售差距"
+            )
+
+    if parsed_s.rows and not parsed_s.mapped.get("moq"):
+        for res in results.values():
+            res.warnings.append(
+                "庫存檔沒有 MOQ 欄位，全部 SKU 當作 MOQ = 1（需求不進位）"
+            )
+    if parsed_t.mapped.get("moq_ignored"):
+        for res in results.values():
+            res.warnings.append(
+                f"Target 檔的「{parsed_t.mapped['moq_ignored']}」欄已忽略 —— "
+                "MOQ 改由店舖庫存檔讀取"
+            )
+    if moq_conflict:
+        for res in results.values():
+            res.warnings.append(
+                f"有 {len(moq_conflict)} 個 SKU 在庫存檔不同店舖的 MOQ 不一致，"
+                "已取最大值（例：" + sorted(moq_conflict)[0] + "）"
             )
 
     if stock_only:
@@ -659,6 +689,7 @@ async def run_create(
             "as_of": date.today().isoformat(),
             "warehouse_sites": sorted(warehouse_codes),
             "has_sales": has_sales,
+            "has_moq": bool(parsed_s.mapped.get("moq")),
             # Snapshot the names so an old batch keeps the wording it was
             # computed with, even after the labels are renamed.
             "scenario_labels": db.scenario_labels(),

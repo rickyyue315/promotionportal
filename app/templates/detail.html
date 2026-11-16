@@ -58,7 +58,7 @@
         <div><div class="k">需求 ／ 可派</div><div class="v">{{ selected.need_qty | num }} ／ {{ selected.total_dispatch | num }}</div></div>
         <div><div class="k">缺貨</div>
           <div class="v"><span class="badge {{ 'danger' if selected.short_qty else 'ok' }}">{{ selected.short_qty | num }}</span></div></div>
-        <div><div class="k">MOQ</div><div class="v">{{ selected.moq }}</div></div>
+        <div><div class="k" title="取自庫存檔的 MOQ">MOQ</div><div class="v">{{ selected.moq }}</div></div>
       </div>
       <div class="table-wrap">
         <table class="tbl">
@@ -129,7 +129,7 @@
         </table>
       </div>
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
-        「需求」是分配量減去現有庫存與在途後的缺口，按 MOQ 向上取整；「可派」受 D001 倉存限制，不足時按需求比例分配。
+        「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；「可派」受 D001 倉存限制，不足時按需求比例分配。
         {% if gate %}{{ gate | join('、') }} 只有 RP Type = RF 才會派貨，ND 或未提供一律 0 件。{% endif %}
       </div>
     {% elif by_shop %}

@@ -95,9 +95,9 @@ def _hb87_demo(client: TestClient) -> int:
 
     wb = Workbook()
     ws = wb.active
-    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
-    ws.append(["111058302001", "抗痘面膜 7片", 100, 6])
-    ws.append(["111058302002", "保濕精華 30ml", 80, 6])
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "抗痘面膜 7片", 100])
+    ws.append(["111058302002", "保濕精華 30ml", 80])
     tbuf = io.BytesIO()
     wb.save(tbuf)
 
@@ -105,12 +105,12 @@ def _hb87_demo(client: TestClient) -> int:
     ws = wb.active
     ws.append(
         ["Article", "Article Description", "RP Type", "Safety Stock",
-         "SaSa Net Stock", "Site"]
+         "SaSa Net Stock", "Site", "MOQ"]
     )
-    ws.append(["111058302001", "抗痘面膜 7片", "ND", 0, 0, "HB87"])
-    ws.append(["111058302001", "抗痘面膜 7片", "RF", 0, 0, "HA01"])
-    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HB87"])
-    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HA01"])
+    ws.append(["111058302001", "抗痘面膜 7片", "ND", 0, 0, "HB87", 6])
+    ws.append(["111058302001", "抗痘面膜 7片", "RF", 0, 0, "HA01", 6])
+    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HB87", 6])
+    ws.append(["111058302002", "保濕精華 30ml", "RF", 0, 0, "HA01", 6])
     sbuf = io.BytesIO()
     wb.save(sbuf)
 

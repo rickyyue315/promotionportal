@@ -96,6 +96,7 @@ CREATE TABLE IF NOT EXISTS sku_target (
     sku         TEXT NOT NULL,
     description TEXT NOT NULL DEFAULT '',
     target_qty  INTEGER NOT NULL,
+    -- Legacy: MOQ now comes from the stock file. Kept so old databases open.
     moq         INTEGER NOT NULL DEFAULT 1
 );
 CREATE INDEX IF NOT EXISTS ix_sku_target_upload ON sku_target(upload_id);
@@ -550,11 +551,12 @@ def create_upload(
         return int(cur.lastrowid)
 
 
-def add_targets(upload_id: int, rows: Iterable[Tuple[str, str, int, int]]) -> None:
+def add_targets(upload_id: int, rows: Iterable[Tuple[str, str, int]]) -> None:
+    """Target rows carry no MOQ: the minimum order comes from the stock file."""
     with db() as conn:
         conn.executemany(
-            "INSERT INTO sku_target (upload_id, sku, description, target_qty, moq) "
-            "VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO sku_target (upload_id, sku, description, target_qty) "
+            "VALUES (?, ?, ?, ?)",
             [(upload_id, *r) for r in rows],
         )
 
@@ -600,14 +602,14 @@ def list_uploads(kind: str, period: Optional[str] = None) -> List[sqlite3.Row]:
         return conn.execute(sql, args).fetchall()
 
 
-def load_targets(upload_id: int) -> List[Tuple[str, str, int, int]]:
+def load_targets(upload_id: int) -> List[Tuple[str, str, int]]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT sku, description, target_qty, moq FROM sku_target "
+            "SELECT sku, description, target_qty FROM sku_target "
             "WHERE upload_id = ? ORDER BY id",
             (upload_id,),
         ).fetchall()
-    return [(r["sku"], r["description"], int(r["target_qty"]), int(r["moq"])) for r in rows]
+    return [(r["sku"], r["description"], int(r["target_qty"])) for r in rows]
 
 
 def load_stock(upload_id: int) -> Dict[str, Dict[str, int]]:

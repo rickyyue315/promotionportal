@@ -21,6 +21,7 @@ from app.calc import (
     normalise_shares,
     round_up_to,
     sales_window_start,
+    sku_moq,
 )
 
 
@@ -72,6 +73,23 @@ class TestRoundUpTo:
     )
     def test_cases(self, qty, moq, expected):
         assert round_up_to(qty, moq) == expected
+
+
+class TestSkuMoq:
+    def test_missing_map_means_one(self):
+        assert sku_moq(None, "SKU1") == 1
+        assert sku_moq({}, "SKU1") == 1
+
+    def test_unknown_sku_means_one(self):
+        assert sku_moq({"SKU2": 12}, "SKU1") == 1
+
+    def test_blank_or_zero_means_one(self):
+        assert sku_moq({"SKU1": 0}, "SKU1") == 1
+        assert sku_moq({"SKU1": ""}, "SKU1") == 1
+
+    def test_value_is_read_from_the_stock_map(self):
+        assert sku_moq({"SKU1": 12}, "SKU1") == 12
+        assert sku_moq({"SKU1": "6"}, "SKU1") == 6
 
 
 class TestNormaliseShares:
@@ -146,17 +164,32 @@ class TestComputeScenario:
             "A",
             ["S1"],
             [1.0],
-            [SkuTarget("SKU1", 100, moq=12)],
+            [SkuTarget("SKU1", 100)],
             {"SKU1": {"S1": 5}},
+            moq_by_sku={"SKU1": 12},
         )
         # gap = 95 -> ceil(95/12)*12 = 96
         assert res.lines[0].dispatch_qty == 96
+        assert res.skus[0].moq == 12
 
     def test_moq_does_not_apply_when_no_gap(self):
         res = compute_scenario(
-            "A", ["S1"], [1.0], [SkuTarget("SKU1", 10, moq=12)], {"SKU1": {"S1": 50}}
+            "A",
+            ["S1"],
+            [1.0],
+            [SkuTarget("SKU1", 10)],
+            {"SKU1": {"S1": 50}},
+            moq_by_sku={"SKU1": 12},
         )
         assert res.lines[0].dispatch_qty == 0
+
+    def test_without_moq_nothing_is_rounded(self):
+        """No MOQ in the stock file: the need is exactly the gap."""
+        res = compute_scenario(
+            "A", ["S1"], [1.0], [SkuTarget("SKU1", 100)], {"SKU1": {"S1": 5}}
+        )
+        assert res.lines[0].dispatch_qty == 95
+        assert res.skus[0].moq == 1
 
     def test_alloc_always_sums_to_target(self):
         targets = [SkuTarget("SKU1", 833), SkuTarget("SKU2", 7)]

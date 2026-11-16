@@ -87,10 +87,11 @@ def targets() -> Path:
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Target"
-    _head(ws, ["SKU", "貨品名稱", "Target Qty", "MOQ"])
-    for sku, name, qty, moq in SKUS:
-        ws.append([sku, name, qty, moq])
-    for col, width in zip("ABCD", (18, 28, 12, 8)):
+    # No MOQ here on purpose: the minimum order rides on the stock file.
+    _head(ws, ["SKU", "貨品名稱", "Target Qty"])
+    for sku, name, qty, _moq in SKUS:
+        ws.append([sku, name, qty])
+    for col, width in zip("ABC", (18, 28, 12)):
         ws.column_dimensions[col].width = width
     path = OUT / "sample_target.xlsx"
     wb.save(path)
@@ -160,6 +161,7 @@ def stock_sap() -> Path:
             "Last Month Sold Qty",
             "MTD Sold Qty",
             "Launch Date",
+            "MOQ",
         ],
     )
 
@@ -167,7 +169,7 @@ def stock_sap() -> Path:
     # One SKU is deliberately starved so the warehouse cap and the shortage
     # column are visible without needing real data.
     starved = "111888009033"
-    for sku, _name, qty, _moq in SKUS:
+    for sku, _name, qty, moq in SKUS:
         scale = 0.55 if sku in ("111888009033", "110773004028") else 1.05
         # Warehouse first: its net stock is the dispatch ceiling.
         ws.append(
@@ -183,6 +185,7 @@ def stock_sap() -> Path:
                 0,
                 0,
                 None,
+                moq,
             ]
         )
         launched = sku == "112009010012"  # one deliberate new product
@@ -205,10 +208,13 @@ def stock_sap() -> Path:
                     sold_last,
                     sold_mtd,
                     datetime(2026, 11, 5) if launched else datetime(2025, 3, 1),
+                    moq,
                 ]
             )
 
-    for col, width in zip("ABCDEFGHIJK", (8, 16, 18, 10, 16, 14, 18, 10, 20, 16, 14)):
+    for col, width in zip(
+        "ABCDEFGHIJKL", (8, 16, 18, 10, 16, 14, 18, 10, 20, 16, 14, 8)
+    ):
         ws.column_dimensions[col].width = width
     path = OUT / "sample_stock_sap.xlsx"
     wb.save(path)

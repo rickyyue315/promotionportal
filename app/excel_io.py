@@ -162,7 +162,9 @@ class StockRow:
 
     Only ``qty`` (SaSa Net Stock) and ``pending`` (Pending Received) are
     quantities we act on. The sales figures are rates fuel for the 4-day cover
-    calculation, not stock.
+    calculation, not stock. ``moq`` rides along because the minimum order is a
+    packaging property of the SKU, which SAP keeps on this row rather than on
+    the target list.
     """
 
     sku: str
@@ -173,6 +175,7 @@ class StockRow:
     last_month_sold: int = 0
     mtd_sold: int = 0
     launch_date: Optional[date] = None
+    moq: int = 1
 
 
 @dataclass
@@ -217,8 +220,11 @@ def parse_target_file(
 
     i_sku = _find(headers, SKU_KEYS)
     i_target = _find(headers, TARGET_KEYS, exclude={i_sku} if i_sku is not None else ())
-    i_moq = _find(headers, MOQ_KEYS)
     i_desc = _find(headers, DESC_KEYS, exclude={i_sku} if i_sku is not None else ())
+    # MOQ lives on the stock side (SKU × shop), not here. The column is still
+    # detected so an old template can be told it is being ignored, instead of
+    # silently producing dispatches that do not respect the number in it.
+    i_moq = _find(headers, MOQ_KEYS, exclude={i_sku} if i_sku is not None else ())
 
     if i_sku is None:
         out.errors.append(
@@ -234,9 +240,15 @@ def parse_target_file(
     out.mapped = {
         "sku": raw[h][i_sku],
         "target": raw[h][i_target],
-        "moq": raw[h][i_moq] if i_moq is not None else "",
         "description": raw[h][i_desc] if i_desc is not None else "",
     }
+    if i_moq is not None:
+        # Recorded, not used: the run warns on the result page so nobody reads
+        # the dispatch numbers as if this column had been applied.
+        out.mapped["moq_ignored"] = str(raw[h][i_moq])
+        out.warnings.append(
+            f"Target 檔的「{raw[h][i_moq]}」欄已忽略 —— MOQ 改由店舖庫存檔讀取"
+        )
 
     seen: Dict[str, int] = {}
     duplicates: List[str] = []
@@ -264,11 +276,6 @@ def parse_target_file(
             fractional.append(sku)
         qty_i = int(round(qty))
 
-        moq = 1
-        if i_moq is not None and i_moq < len(row):
-            m = to_number(row[i_moq])
-            if m and m > 1:
-                moq = int(round(m))
         desc = ""
         if i_desc is not None and i_desc < len(row) and row[i_desc] is not None:
             desc = str(row[i_desc]).strip()
@@ -277,7 +284,7 @@ def parse_target_file(
             duplicates.append(sku)
             continue
         seen[sku] = 1
-        out.rows.append((sku, desc, qty_i, moq))
+        out.rows.append((sku, desc, qty_i))
 
     if duplicates:
         out.errors.append(
@@ -344,6 +351,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
     i_last = _find(headers, LAST_MONTH_KEYS, exclude={i_sku, i_shop, i_stock, i_rp})
     i_mtd = _find(headers, MTD_KEYS, exclude={i_sku, i_shop, i_stock, i_rp})
     i_launch = _find(headers, LAUNCH_KEYS, exclude={i_sku, i_shop, i_stock, i_rp})
+    i_moq = _find(headers, MOQ_KEYS, exclude={i_sku, i_shop, i_stock})
 
     # Is it a wide pivot (one column per shop)?
     shop_cols = [
@@ -397,6 +405,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             "last_month_sold": original[i_last] if i_last is not None else "",
             "mtd_sold": original[i_mtd] if i_mtd is not None else "",
             "launch_date": original[i_launch] if i_launch is not None else "",
+            "moq": original[i_moq] if i_moq is not None else "",
         }
         out.warnings.append("偵測為長表格式（每行一個 SKU × 店舖）")
         pairs2: Dict[Tuple[str, str], int] = {}
@@ -405,6 +414,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         pending_map: Dict[Tuple[str, str], int] = {}
         sales_map: Dict[Tuple[str, str], Tuple[int, int]] = {}
         launch_map: Dict[Tuple[str, str], date] = {}
+        moq_map: Dict[Tuple[str, str], int] = {}
         dup2 = set()
         bad = 0
         for offset, row in enumerate(body, start=h + 2):
@@ -444,6 +454,12 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             if launch and (key not in launch_map or launch < launch_map[key]):
                 launch_map[key] = launch
 
+            m = to_number(row[i_moq]) if i_moq is not None and i_moq < len(row) else None
+            if m and m > 1:
+                # Repeated on every site of the same SKU; the largest wins so a
+                # stray 1 on one row cannot cancel the real minimum.
+                moq_map[key] = max(moq_map.get(key, 1), int(round(m)))
+
             if i_rp is not None and i_rp < len(row):
                 rp = str(row[i_rp] or "").strip().upper()
                 if rp:
@@ -477,6 +493,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
                 last_month_sold=sales_map.get((sku, shop), (0, 0))[0],
                 mtd_sold=sales_map.get((sku, shop), (0, 0))[1],
                 launch_date=launch_map.get((sku, shop)),
+                moq=moq_map.get((sku, shop), 1),
             )
             for (sku, shop), qty in pairs2.items()
         ]
@@ -707,10 +724,11 @@ def export_run(
             ws2,
             [
                 "SKU", "貨品名稱", "店舖", "佔比", "分配數量", "現有庫存",
-                "在途", "可用", "差距", "需求", "可派", "缺貨",
+                "在途", "可用", "差距", "MOQ", "需求", "可派", "缺貨",
                 "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
             ],
         )
+        moq_of = {s.sku: s.moq for s in res.skus}
         for ln in res.lines:
             reason = ""
             if ln.blocked:
@@ -728,6 +746,7 @@ def export_run(
                     ln.pending_qty,
                     ln.on_hand,
                     ln.gap_qty,
+                    moq_of.get(ln.sku, 1),
                     ln.need_qty,
                     ln.dispatch_qty,
                     ln.short_qty,
@@ -759,6 +778,10 @@ def export_run(
         ws3.append(["貨倉口徑", "只計 SaSa Net Stock；Pending Received 為入倉量，不計入"])
     if params.get("has_sales") is False:
         ws3.append(["銷售數據", "庫存檔沒有銷售欄位，未計算預計銷量與差距"])
+    if params.get("has_moq") is False:
+        ws3.append(["MOQ", "庫存檔沒有 MOQ 欄，全部當作 1（需求不進位）"])
+    elif params.get("has_moq"):
+        ws3.append(["MOQ 來源", "店舖庫存檔的 MOQ 欄；每店需求向上取至 MOQ 倍數"])
     for sc in scenarios:
         name = (labels.get(sc) or {}).get("label") or ""
         if name:
@@ -824,21 +847,20 @@ def export_target_template() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Target"
-    ws.append(["SKU", "貨品名稱", "Target Qty", "MOQ"])
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
     for cell in ws[1]:
         cell.font = _HEAD_FONT
         cell.fill = _HEAD_FILL
-    ws.append(["109991605010", "示範貨品 A", 1200, 12])
-    ws.append(["110331002001", "示範貨品 B", 800, 1])
+    ws.append(["109991605010", "示範貨品 A", 1200])
+    ws.append(["110331002001", "示範貨品 B", 800])
     ws.column_dimensions["A"].width = 18
     ws.column_dimensions["B"].width = 30
     ws.column_dimensions["C"].width = 12
-    ws.column_dimensions["D"].width = 10
 
     note = wb.create_sheet("說明")
     note.append(["SKU", "必填，不可重複"])
     note.append(["Target Qty", "必填，整數"])
-    note.append(["MOQ", "選填，派貨量會向上取至 MOQ 的倍數；留空等於 1"])
+    note.append(["MOQ", "不在這個檔：MOQ 由店舖庫存檔的 MOQ 欄提供，留空即不進位"])
     return _save(wb)
 
 
@@ -859,7 +881,8 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["寬表：第一欄 SKU，之後每欄一個店舖代碼"])
     note.append(["或改成三欄長表：SKU / 店舖 / 庫存，系統會自動辨識"])
     note.append(["長表可加一欄 RP Type（例如 ND / RF）；HB87 只有 RF 才派貨，其餘店舖不看這欄"])
-    note.append(["SAP 匯出的明細（Article / Site / SaSa Net Stock / RP Type）可直接上載"])
+    note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
+    note.append(["SAP 匯出的明細（Article / Site / SaSa Net Stock / RP Type / MOQ）可直接上載"])
     return _save(wb)
 
 

@@ -42,10 +42,10 @@ uvicorn app.main:app --reload --port 8000
 | 檔案 | 用途 |
 |------|------|
 | `sample_shares.xlsx` | 20 間店舖的 A／B／C 佔比 |
-| `sample_target.xlsx` | 10 個 SKU 的 Target 與 MOQ |
+| `sample_target.xlsx` | 10 個 SKU 的 Target（MOQ 在庫存檔，不在這裡） |
 | `sample_stock_wide.xlsx` | 寬表格式庫存（每欄一店） |
 | `sample_stock_long.xlsx` | 長表格式庫存（SKU／店舖／數量） |
-| `sample_stock_sap.xlsx` | SAP 明細格式：含 `D001` 貨倉、在途、銷量、Launch Date |
+| `sample_stock_sap.xlsx` | SAP 明細格式：含 `D001` 貨倉、在途、銷量、Launch Date、MOQ |
 
 重新產生：`python samples/make_samples.py`
 
@@ -132,7 +132,11 @@ SQLite 單檔，每月一次計算的資料量在幾 MB 以內。
 需求 = 差距 > 0 ? ceil(差距 / MOQ) × MOQ : 0
 ```
 
-MOQ 留空或 1 表示不進位。**在途會扣減需求** —— 已經在路上的貨不應再派一次。
+**MOQ 來自店舖庫存檔（SKU × 每店舖庫存），不是 Target 檔。** Target 檔只管「要賣幾多」，
+MOQ 是 SKU 的包裝規格，SAP 把它放在 Article／Site 那一行。庫存檔沒有 MOQ 欄就當作 1，
+即完全不進位。同一 SKU 不同店舖的 MOQ 不一致時取最大值，並在提示中列出。
+
+**在途會扣減需求** —— 已經在路上的貨不應再派一次。
 
 ### 4. 貨倉上限
 
@@ -246,12 +250,13 @@ RP Type 由庫存檔提供，所以庫存檔必須是**長表**（每行一個 S
 
 ### SKU × Target
 
-| SKU | 貨品名稱 | Target Qty | MOQ |
-|-----|---------|-----------|-----|
-| 109991605010 | 柔潤潔面乳 120ml | 2400 | 12 |
+| SKU | 貨品名稱 | Target Qty |
+|-----|---------|-----------|
+| 109991605010 | 柔潤潔面乳 120ml | 2400 |
 
 - SKU 不可重複（重複會直接擋下來，不會靜默翻倍）
-- MOQ 選填
+- 只要 SKU 與 Target Qty，**不需要 MOQ**；MOQ 由下面的庫存檔提供
+- 如果舊檔仍帶著 MOQ 欄，系統會照樣讀入其餘欄位，並提示「MOQ 欄已忽略」
 
 ### 店舖庫存
 
@@ -263,12 +268,12 @@ RP Type 由庫存檔提供，所以庫存檔必須是**長表**（每行一個 S
 |-----|------|------|------|-----|
 | 109991605010 | 132 | 122 | 151 | |
 
-**長表**（每行一筆，可加 RP Type）
+**長表**（每行一筆，可加 RP Type 與 MOQ）
 
-| SKU | 店舖 | 庫存 | RP Type |
-|-----|------|------|---------|
-| 109991605010 | HA19 | 132 | RF |
-| 109991605010 | HB87 | 40 | ND |
+| SKU | 店舖 | 庫存 | RP Type | MOQ |
+|-----|------|------|---------|-----|
+| 109991605010 | HA19 | 132 | RF | 12 |
+| 109991605010 | HB87 | 40 | ND | 12 |
 
 **SAP 匯出的明細可以直接上載**，常見欄名會自動對應：
 
@@ -282,6 +287,7 @@ RP Type 由庫存檔提供，所以庫存檔必須是**長表**（每行一個 S
 | `Last Month Sold Qty` | 日銷分子（上月） |
 | `MTD Sold Qty` | 日銷分子（本月至今） |
 | `Launch Date` | 新產品只用推出後日數做分母 |
+| `MOQ` | 每店需求向上取至 MOQ 倍數 |
 
 其他欄位（`Safety Stock`、`Stock in Transit`、`Blocked`、`Consignment` …）一律不當作貨量。
 `Safety Stock` 的位置通常在 `SaSa Net Stock` 左邊，`Shop ABC indicator` 又含 "shop" 字，
@@ -317,7 +323,7 @@ promo-portal/
 python -m pytest tests/ -q
 ```
 
-82 個測試，約 7 秒。涵蓋分配演算法、MOQ 進位、夠貨邊界、
+89 個測試，約 4 秒。涵蓋分配演算法、MOQ 進位（來源為庫存檔）、夠貨邊界、
 推廣日數縮小 Target、派貨批次切分、日銷與 Launch Date、貨倉上限分配、
 完整上載到匯出流程、角色權限、重複 SKU 攔截、
 SAP 欄位辨識、HB87 的 RP Type 規則、餐別名稱快照。
@@ -341,3 +347,5 @@ SAP 欄位辨識、HB87 的 RP Type 規則、餐別名稱快照。
    一律當作不可派。如果日後有第三種可派代碼，要改成白名單。
 8. **RP Type 是 SKU × 店舖的屬性**，取自庫存檔該店那一行；
    同一 SKU 同一店若出現多個不同 RP Type，會當作未提供並在提示中列出。
+9. **MOQ 是 SKU 屬性，取自庫存檔**（SAP 的 `MOQ` 欄），Target 檔不提供 MOQ。
+   同一 SKU 在不同店舖的 MOQ 不一致時取最大值；庫存檔沒有 MOQ 欄就不進位。
