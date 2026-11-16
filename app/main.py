@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, File, Form, Request, UploadFile
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
@@ -511,6 +511,38 @@ def template_download(request: Request, kind: str):
         shops = db.active_shop_codes()
         return _xlsx(excel_io.export_stock_template(shops), "店舖庫存_範本.xlsx")
     return back("/run/new", "未知的範本類型", "error")
+
+
+@app.post("/run/probe/dates")
+async def run_probe_dates(request: Request, target_file: UploadFile = File(...)):
+    """What the upload page asks the moment a target file is chosen.
+
+    Reading the sheet here is not a second implementation of the dates: it is
+    the same parse the run will do, so the numbers shown before pressing 開始計算
+    are the numbers the run will use. It also surfaces a broken file early,
+    while the person is still looking at the file picker.
+    """
+    auth.require_user(request)
+    data = await target_file.read()
+    if not data:
+        return JSONResponse({"ok": False, "errors": ["檔案是空的"], "warnings": []})
+
+    parsed = excel_io.parse_target_file(data)
+    start, end = parsed.promo_start, parsed.promo_end
+    found = bool(start and end)
+    return JSONResponse(
+        {
+            "ok": found,
+            "start": start.isoformat() if start else "",
+            "end": end.isoformat() if end else "",
+            "days": (end - start).days + 1 if found else 0,
+            "n_sku": len(parsed.rows),
+            "errors": parsed.errors[:3],
+            # Only the notes about the dates themselves: the rest belong to the
+            # run and would be noise next to a file picker.
+            "warnings": [w for w in parsed.warnings if "推廣" in w][:2],
+        }
+    )
 
 
 @app.post("/run/new")

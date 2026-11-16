@@ -171,6 +171,17 @@ label.field > span {
 }
 .choice input { margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
 
+/* What the portal read out of the chosen file, shown before 開始計算. */
+.probe {
+  font-size: 12.5px; line-height: 1.5;
+  margin: 0 0 8px; padding: 6px 10px;
+  border: 1px solid var(--border); border-radius: var(--radius-sm);
+  background: var(--surface-2); color: var(--text-2);
+}
+.probe.ok { background: var(--ok-soft); border-color: #cbe5d8; color: var(--ok); }
+.probe.warn { background: var(--warn-soft); border-color: #eeddb8; color: var(--warn); }
+.probe.bad { background: var(--danger-soft); border-color: #efccc7; color: var(--danger); }
+
 /* ---------- table ---------- */
 .table-wrap { overflow: auto; max-height: 68vh; }
 table.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }

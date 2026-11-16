@@ -1120,6 +1120,60 @@ def test_blank_promo_columns_fall_back_to_the_form():
     assert any("兩欄都是空白" in w for w in parsed.warnings)
 
 
+def test_choosing_the_file_reports_the_dates_before_the_run(client):
+    """The upload page asks this the moment a file is picked."""
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/probe/dates",
+        files={
+            "target_file": (
+                "with_dates.xlsx",
+                _promo_target(
+                    [
+                        ("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26"),
+                        ("111058302002", "HYDRA 14PC", 1200, "17-Nov-26", "26-Nov-26"),
+                    ]
+                ),
+            )
+        },
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["start"] == "2026-11-17"
+    assert body["end"] == "2026-11-26"
+    assert body["days"] == 10
+    assert body["n_sku"] == 2
+
+
+def test_file_without_dates_says_so_before_the_run(client):
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/probe/dates",
+        files={
+            "target_file": (
+                "no_dates.xlsx",
+                _promo_target([("111058302001", "HYDRA 7PC", 4000, None, None)]),
+            )
+        },
+    )
+    body = resp.json()
+    assert body["ok"] is False
+    assert body["start"] == ""
+    assert any("推廣" in w for w in body["warnings"])
+
+
+def test_probe_needs_a_session():
+    with TestClient(app) as fresh:
+        resp = fresh.post(
+            "/run/probe/dates",
+            files={"target_file": ("t.xlsx", b"x")},
+            follow_redirects=False,
+        )
+    assert resp.status_code == 303
+    assert resp.headers["location"].startswith("/login")
+
+
 def test_promo_dates_come_from_the_file_not_the_form(client):
     from openpyxl import Workbook
 

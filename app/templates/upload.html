@@ -92,6 +92,7 @@
             <span>SKU × Target Qty</span>
             <input class="file" type="file" name="target_file" accept=".xlsx,.xls" required>
           </label>
+          <p class="probe" id="probeNote" hidden></p>
           <p class="dim" style="font-size:12.5px;margin:0">
             只要 SKU 與 Target Qty 兩欄；如有
             <span class="mono">Start date (Promo)</span>／<span class="mono">End date (Promo)</span>
@@ -179,16 +180,33 @@ const hintEl = document.getElementById('promoHint');
 const startLabel = document.getElementById('startLabel');
 const endLabel = document.getElementById('endLabel');
 const modeEls = document.querySelectorAll('input[name="date_source"]');
+const targetEl = document.querySelector('input[name="target_file"]');
+const probeEl = document.getElementById('probeNote');
+
+const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun',
+                'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+
+function fmtDate(iso) {
+  if (!iso) return '—';
+  const [y, m, d] = iso.split('-').map(Number);
+  return String(d).padStart(2, '0') + '-' + MONTHS[m - 1] + '-' + String(y).slice(-2);
+}
 
 function autoMode() {
   const picked = document.querySelector('input[name="date_source"]:checked');
   return !picked || picked.value === 'auto';
 }
 
+// The window the last successful read returned, or null. The fields are the
+// source of truth for the hint, but only "these came from the sheet" earns the
+// 讀自 Target 檔 wording.
+let probed = null;
+
 function refreshPromo() {
   const auto = autoMode();
-  // In auto mode the dates are read from the target file; the fields stay as
-  // a fallback for a file that does not carry them, so they are not required.
+  // In auto mode the dates are read from the target file and filled into these
+  // fields; they only act as a fallback for a file without them, so they are
+  // never required.
   startEl.required = !auto;
   endEl.required = !auto;
   startEl.style.opacity = auto ? '.65' : '';
@@ -196,30 +214,87 @@ function refreshPromo() {
   startLabel.textContent = auto ? '推廣開始日期（檔案沒有時才用）' : '推廣開始日期';
   endLabel.textContent = auto ? '推廣完結日期（檔案沒有時才用）' : '推廣完結日期';
 
-  if (auto) {
-    const days = (startEl.value && endEl.value)
-      ? Math.floor((new Date(endEl.value) - new Date(startEl.value)) / 86400000) + 1
-      : 0;
-    hintEl.textContent = '推廣期會直接用 Target 檔的 Start date (Promo)／End date (Promo)，'
-      + '不用再填。檔案沒有這兩欄或全部空白時，才用下面手填的日期。'
-      + (days > 0 ? `　手填那組是 ${days} 日。` : '');
-    return;
-  }
   if (!startEl.value || !endEl.value) {
-    hintEl.textContent = '請填寫推廣開始與完結日期。';
+    hintEl.textContent = auto
+      ? '選好 Target 檔後會自動讀出 Start date (Promo)／End date (Promo)，填入上面的日期。'
+      : '請填寫推廣開始與完結日期。';
     return;
   }
   const promoDays = Math.floor((new Date(endEl.value) - new Date(startEl.value)) / 86400000) + 1;
-  const want = Math.max(1, parseInt(daysEl.value || '0', 10));
   if (promoDays <= 0) {
     hintEl.textContent = '完結日期不可早於開始日期。';
     return;
   }
+  const want = Math.max(1, parseInt(daysEl.value || '0', 10));
   const eff = Math.min(want, promoDays);
   const example = Math.max(1, Math.round(1400 * eff / promoDays));
-  hintEl.textContent = `推廣 ${promoDays} 日，每次派 ${eff} 日貨：派貨目標 = Target × ${eff}/${promoDays}`
-    + `（例如 Target 1,400 → ${example.toLocaleString()}）。`;
+
+  const fromFile = probed && startEl.value === probed.start && endEl.value === probed.end;
+  hintEl.textContent = (auto && fromFile ? '日期讀自 Target 檔：' : '推廣期 ')
+    + `${fmtDate(startEl.value)} → ${fmtDate(endEl.value)}（${promoDays} 日），`
+    + `每次派 ${eff} 日：派貨目標 = Target × ${eff}/${promoDays}`
+    + `（例如 Target 1,400 → ${example.toLocaleString()}）。`
+    + (auto && probed && !fromFile
+      ? `　注意：自動模式仍會用檔案的 ${fmtDate(probed.start)} → ${fmtDate(probed.end)}。`
+      : '');
 }
+
+function showProbe(text, kind) {
+  probeEl.hidden = false;
+  probeEl.className = 'probe ' + kind;
+  probeEl.textContent = text;
+}
+
+// Reading the file before the run is the same parse the run will do, so the
+// dates shown here are the dates that get used — and a broken file is caught
+// while the person is still looking at the file picker.
+let probeSeq = 0;
+
+async function probeTarget() {
+  const file = targetEl.files && targetEl.files[0];
+  if (!file) {
+    probeEl.hidden = true;
+    return;
+  }
+  const seq = ++probeSeq;
+  probed = null;
+  showProbe(`正在讀取 ${file.name} …`, 'wait');
+
+  const body = new FormData();
+  body.append('target_file', file);
+  let data;
+  try {
+    const res = await fetch('/run/probe/dates', { method: 'POST', body });
+    // An expired session is answered with a redirect to the login page, i.e.
+    // HTML. Treat anything that is not our JSON as "could not read".
+    if (!res.ok || !(res.headers.get('content-type') || '').includes('application/json')) {
+      throw new Error('not json');
+    }
+    data = await res.json();
+  } catch (e) {
+    if (seq === probeSeq) showProbe('未能讀取這個檔案，按「開始計算」時會再試一次。', 'warn');
+    return;
+  }
+  if (seq !== probeSeq) return;  // another file was picked while this one loaded
+
+  if (data.errors && data.errors.length) {
+    showProbe('這個檔案有問題：' + data.errors[0], 'bad');
+    return;
+  }
+  if (data.start && data.end) {
+    startEl.value = data.start;
+    endEl.value = data.end;
+    probed = { start: data.start, end: data.end };
+    showProbe(`已讀到 ${data.n_sku} 個 SKU，推廣期 ${fmtDate(data.start)} → ${fmtDate(data.end)}`
+      + `（${data.days} 日），已填入上面的日期。`, 'ok');
+  } else {
+    showProbe(`已讀到 ${data.n_sku} 個 SKU，但檔案沒有推廣日期`
+      + (data.warnings && data.warnings[0] ? '：' + data.warnings[0] : '，會用上面的日期。'), 'warn');
+  }
+  refreshPromo();
+}
+
+targetEl.addEventListener('change', probeTarget);
 [startEl, endEl, daysEl].forEach(el => el.addEventListener('input', refreshPromo));
 modeEls.forEach(el => el.addEventListener('change', refreshPromo));
 refreshPromo();
