@@ -81,7 +81,7 @@
               <th class="num">可派</th>
               <th class="num">缺貨</th>
               <th class="num">日銷</th>
-              <th class="num">可調出</th>
+              <th class="num" title="店舖現有庫存減去該店分配數量（有盈餘＝可以抽走）。只在貨倉（D001）不夠派時才列出；D001 有貨就由 D001 出，不會叫店舖調出。行貨店舖不計（調撥由 Buyer 在另一個系統安排）">可調出</th>
             </tr>
           </thead>
           <tbody>
@@ -153,6 +153,14 @@
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
         「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；
         「可派」受 D001 倉存限制，不足時按需求比例分配（只計倉貨店舖）。
+        {% if selected.short_qty %}
+        <br>這個 SKU 的貨倉（D001）不夠派，所以「可調出」列出各倉貨店舖手上有多少可以抽走：
+        <strong>現有庫存 − 分配數量</strong>（不計在途）。全部留空即代表沒有店舖有盈餘，
+        缺貨只能靠補貨或開 PO。D001 有貨的 SKU 一律不顯示，因為貨由 D001 出，不需要動店舖的貨。
+        {% else %}
+        <br>「可調出」只在<strong>貨倉（D001）不夠派</strong>時才有意思：D001 有貨就由 D001 出，
+        不會叫店舖把貨調出來，所以這裡一律留空。行貨店舖亦不計，要調撥由 Buyer 在另一個系統安排。
+        {% endif %}
         {% if selected.group %}
         <br>這個 SKU 屬共用 Target 貨組 <strong>{{ selected.group }}</strong>，上面的 Target 是它在組內分到的份額；
         每店需求會與組內其他 SKU 一併封頂，兩邊不會就同一批缺貨各派一次。
@@ -184,7 +192,7 @@
               <th class="num">現有庫存合計</th>
               <th class="num">需派貨合計</th>
               {% if po_shop %}<th class="num">其中開 PO</th>{% endif %}
-              <th class="num">可調出合計</th>
+              <th class="num" title="各 SKU 可調出的總和；只計貨倉（D001）不夠派的 SKU，行貨店舖不計">可調出合計</th>
               <th class="num">有派貨 SKU</th>
             </tr>
           </thead>

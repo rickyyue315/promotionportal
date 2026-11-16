@@ -27,6 +27,12 @@ For each SKU:
 
     enough = total_stock >= target
 
+``surplus`` (可調出) is only reported when the warehouse could not cover the
+demand in the first place (see ``_warehouse_short``): if D001 has the stock, the
+units are sent from there and no shop is asked to give anything back. Vendor
+shops are never counted — a transfer of 行貨 is arranged by the buyer in another
+system, so a number here would only duplicate work done elsewhere.
+
 Note that "enough" can be true while dispatch is non-zero: the goods exist, they
 are just in the wrong shops. That distinction is the whole point of the report,
 so it is modelled explicitly as ``coverage_status``.
@@ -608,6 +614,21 @@ def cap_to_available(
     return [o * step for o in out]
 
 
+def _warehouse_short(rows: Sequence[dict], dispatched: Sequence[int]) -> int:
+    """How much the warehouse failed to send to the shops that rely on it.
+
+    Only warehouse-sourced, non-gated rows count: a vendor shop is answered by a
+    PO rather than D001, and a gated shop's need is refused by rule instead of
+    being missing from the warehouse. Anything above zero is the signal that
+    stock has to be pulled back from a shop holding more than it needs.
+    """
+    return sum(
+        max(row["need"] - qty, 0)
+        for row, qty in zip(rows, dispatched)
+        if not row["vendor"] and not row["blocked"]
+    )
+
+
 def _cap_group_needs(prepared: Sequence[dict], n_shops: int) -> None:
     """Cap a group's per-shop needs at what the group as a whole is missing.
 
@@ -888,6 +909,17 @@ def compute_scenario(
             round_up_to(qty if row["vendor"] else wh, moq)
             for row, qty, wh in zip(rows, candidates, capped_wh)
         ]
+
+        # 可調出 is a rescue figure, not a stock report: it only means something
+        # when D001 could not send what the shops asked for. With enough stock at
+        # the warehouse the goods come from there and a shop holding more than
+        # its allocation simply keeps it. 行貨 is left out either way — a transfer
+        # of vendor stock is arranged by the buyer in another system, so a number
+        # here would only duplicate work done elsewhere.
+        pulling = _warehouse_short(rows, capped) > 0
+        for row in rows:
+            if row["vendor"] or not pulling:
+                row["surplus"] = 0
 
         total_stock = 0
         total_pending = 0

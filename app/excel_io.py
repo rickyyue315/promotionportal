@@ -1108,6 +1108,13 @@ def export_run(
     if params.get("warehouse_sites"):
         ws3.append(["貨倉", "、".join(params["warehouse_sites"])])
         ws3.append(["貨倉口徑", "只計 SaSa Net Stock；Pending Received 為入倉量，不計入"])
+    ws3.append(
+        [
+            "明細「可調出」",
+            "店舖現有庫存 − 分配數量（不計在途），只在貨倉（D001）不夠派時才列出；"
+            "D001 有貨就由 D001 出，不叫店舖調出。行貨店舖不計，調撥由 Buyer 在另一個系統安排",
+        ]
+    )
     if params.get("has_sales") is False:
         ws3.append(["銷售數據", "庫存檔沒有銷售欄位，未計算預計銷量與差距"])
     if params.get("has_moq") is False:

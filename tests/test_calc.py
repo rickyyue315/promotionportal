@@ -143,7 +143,9 @@ class TestComputeScenario:
         assert line["S1"].dispatch_qty == 40
         assert line["S2"].alloc_qty == 50
         assert line["S2"].dispatch_qty == 0
-        assert line["S2"].surplus_qty == 30
+        # No warehouse in this file, so nothing proves D001 is short and the
+        # 可調出 column stays empty; see TestSurplus for the gating rules.
+        assert line["S2"].surplus_qty == 0
 
         sku = res.skus[0]
         assert sku.total_stock == 90
@@ -162,7 +164,9 @@ class TestComputeScenario:
         assert sku.shortfall_qty == 0
         assert sku.coverage_status == COVERAGE_SUFFICIENT
         assert sku.total_dispatch == 50  # S1 still needs 50 moved in
-        assert sku.surplus_qty == 150  # S2 can give away 150
+        # S2 holds 150 more than its share, but the move is D001's job: the
+        # warehouse was never asked, so 可調出 is not raised.
+        assert sku.surplus_qty == 0
 
     def test_moq_rounds_dispatch_up(self):
         res = compute_scenario(
@@ -907,3 +911,91 @@ class TestVendorFullPeriodTarget:
         row = compare_scenarios({"A": res})[0]
         assert row["scenarios"]["A"].po_target == 340
         assert row["scenarios"]["A"].po_qty == 340
+
+
+class TestSurplus:
+    """可調出 is a rescue figure, not a stock report.
+
+    It only answers "where can we take stock from when D001 cannot cope", so it
+    stays empty whenever the warehouse covers the demand, and 行貨 never counts
+    (the buyer moves vendor stock in another system).
+    """
+
+    def _run(self, shops, stock, warehouse, target=100, shares=None, **kwargs):
+        shares = shares or [1.0 / len(shops)] * len(shops)
+        return compute_scenario(
+            "A",
+            list(shops),
+            list(shares),
+            [SkuTarget("K", target)],
+            stock,
+            warehouse_by_sku=warehouse,
+            **kwargs,
+        )
+
+    def test_surplus_shown_when_the_warehouse_cannot_cope(self):
+        # S1 needs 50, D001 only has 20 -> 30 short, so S2's 150 spare matters.
+        res = self._run(["S1", "S2"], {"K": {"S1": 0, "S2": 200}}, {"K": 20})
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert res.skus[0].short_qty == 30
+        assert by_shop["S2"].surplus_qty == 150
+        assert res.skus[0].surplus_qty == 150
+
+    def test_surplus_hidden_when_the_warehouse_has_enough(self):
+        # Same shops, D001 can cover the 50 -> the stock comes from D001 and
+        # nobody is asked to give anything back.
+        res = self._run(["S1", "S2"], {"K": {"S1": 0, "S2": 200}}, {"K": 50})
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert res.skus[0].short_qty == 0
+        assert by_shop["S2"].surplus_qty == 0
+        assert res.skus[0].surplus_qty == 0
+
+    def test_surplus_looks_at_stock_only_not_pending(self):
+        # 在途 has not reached the shop, so it cannot be pulled out of it.
+        res = self._run(
+            ["S1", "S2"],
+            {"K": {"S1": 0, "S2": 60}},
+            {"K": 0},
+            sales_by_sku={"K": {"S2": ShopSales(pending_qty=200)}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["S2"].pending_qty == 200
+        assert by_shop["S2"].surplus_qty == 10  # 60 stock - 50 allocation
+
+    def test_vendor_surplus_is_never_counted(self):
+        # V1 sits on 250 spare, but 行貨 transfers are arranged elsewhere.
+        res = self._run(
+            ["W1", "V1"],
+            {"K": {"W1": 0, "V1": 300}},
+            {"K": 10},
+            supply_by_sku={"K": {"W1": "2", "V1": "1"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["V1"].vendor
+        assert by_shop["V1"].surplus_qty == 0
+        assert res.skus[0].surplus_qty == 0
+
+    def test_surplus_uses_the_shops_own_allocation_basis(self):
+        # A warehouse shop is measured on the 4-day target, a vendor shop on the
+        # full 14-day one, and 可調出 follows the same basis.
+        promo = PromoWindow(start=date(2026, 11, 1), end=date(2026, 11, 14), dispatch_days=4)
+        res = self._run(
+            ["W1", "W2", "V1"],
+            {"K": {"W1": 200, "W2": 0, "V1": 800}},
+            {"K": 0},
+            target=1400,
+            shares=[0.25, 0.25, 0.5],
+            promo=promo,
+            supply_by_sku={"K": {"W1": "2", "W2": "2", "V1": "1"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        # 4-day target 400 -> W1 100, W2 100; 14-day target 1400 -> V1 700.
+        assert by_shop["W1"].alloc_qty == 100
+        assert by_shop["W1"].surplus_qty == 100  # 200 stock - 100 (not the 350)
+        assert by_shop["W2"].alloc_qty == 100
+        assert by_shop["W2"].surplus_qty == 0
+        assert by_shop["V1"].alloc_qty == 700
+        assert by_shop["V1"].surplus_qty == 0  # 100 spare, but 行貨
+        assert res.skus[0].surplus_qty == 100
+        assert by_shop["V1"].alloc_qty == 700
+        assert by_shop["V1"].surplus_qty == 0  # dead stock, still not pullable
