@@ -863,7 +863,7 @@ def export_run(
     # 開 PO sits inside the scenario block because it moves with the share mix,
     # unlike 派貨目標 or 日銷 which are the same for A/B/C.
     for sc in scenarios:
-        headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO", f"{sc} 缺貨"]
+        headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO（全期）", f"{sc} 缺貨"]
     _put_header(ws, headers)
 
     for row in compare_rows:
@@ -904,9 +904,9 @@ def export_run(
         _put_header(
             ws2,
             [
-                "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "佔比",
+                "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "分配基準", "佔比",
                 "分配數量", "現有庫存", "在途", "可用", "差距", "MOQ",
-                "需求", "可派 STO", "開 PO", "缺貨",
+                "需求", "可派 STO", "開 PO（全期）", "缺貨",
                 "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
             ],
         )
@@ -924,6 +924,7 @@ def export_run(
                     ln.shop_code,
                     "行貨" if ln.vendor else "倉貨",
                     ln.supply_source,
+                    "全期" if ln.alloc_full_period else "派貨期",
                     round(ln.share_pct, 6),
                     ln.alloc_qty,
                     ln.stock_qty,
@@ -995,6 +996,13 @@ def export_run(
                 "Supply Source 規則",
                 "行貨由 Buyer 開 PO，不佔 D001 倉存、不計入缺貨；"
                 "2（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
+            ]
+        )
+        ws3.append(
+            [
+                "行貨計算基準",
+                "按整段推廣的全期 Target 計算（不受派貨日數縮小）；"
+                "倉貨仍只派首 " + str(params.get("dispatch_days", "")) + " 日",
             ]
         )
     elif params.get("has_supply_source") is False:

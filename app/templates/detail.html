@@ -53,6 +53,9 @@
       <div class="statbar">
         <div><div class="k">Target{% if selected.group %}（貨組 {{ selected.group }}）{% endif %}</div><div class="v">{{ selected.target_qty | num }}</div></div>
         <div><div class="k">派貨目標</div><div class="v">{{ selected.dispatch_target | num }}</div></div>
+        {% if selected.po_target %}
+        <div><div class="k" title="行貨店舖按整段推廣的全期 Target 分配">行貨全期目標</div><div class="v">{{ selected.po_target | num }}</div></div>
+        {% endif %}
         <div><div class="k">店舖庫存</div><div class="v">{{ selected.total_stock | num }}</div></div>
         <div><div class="k">在途</div><div class="v">{{ selected.total_pending | num }}</div></div>
         <div><div class="k">倉存</div><div class="v">{{ selected.warehouse_qty | num }}</div></div>
@@ -69,7 +72,7 @@
               {% if supply.has_column %}<th>貨源</th>{% endif %}
               {% if gate %}<th>RP Type</th>{% endif %}
               <th class="num">佔比</th>
-              <th class="num">分配數量</th>
+              <th class="num" title="行貨店舖按全期 Target 分配（標示「全期」）；倉貨店舖按派貨日數分配">分配數量</th>
               <th class="num">現有庫存</th>
               <th class="num">在途</th>
               <th class="num">差距</th>
@@ -101,7 +104,7 @@
               </td>
               {% endif %}
               <td class="num">{{ '%.2f%%' % (ln.share_pct * 100) }}</td>
-              <td class="num">{{ ln.alloc_qty | num }}</td>
+              <td class="num">{{ ln.alloc_qty | num }}{% if ln.alloc_full_period %}<span class="badge warn" style="margin-left:4px" title="行貨：按整段推廣的全期 Target 分配，不受派貨日數縮小">全期</span>{% endif %}</td>
               <td class="num">{{ ln.stock_qty | num }}</td>
               <td class="num">{{ ln.pending_qty | num }}</td>
               <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
@@ -156,6 +159,9 @@
         <br>「貨源」取自庫存檔的 <span class="mono">Supply Source</span>：{{ supply.codes | join('／') }} 是行貨，
         需求由 <strong>Buyer 開 PO</strong> 落單，不經 D001、不受倉存上限限制，所以「缺貨」不會計入這些店舖；
         2（或其他代碼）是倉貨，由 RP 開 STO 從 D001 取貨。
+        <br>標示「全期」的分配數量，是按<strong>整段推廣的 Target</strong> 計（行貨 PO 一次過覆蓋全期），
+        不受派貨日數縮小；沒有標示的是倉貨，只計首 {{ params.dispatch_days or '—' }} 日，所以同一 SKU
+        在兩種店舖的「分配數量」基準不同，橫向相加只作參考。
         {% elif not supply.has_column %}
         <br>庫存檔沒有 <span class="mono">Supply Source</span> 欄位，全部店舖當作倉貨（由 D001 開 STO）。
         {% endif %}

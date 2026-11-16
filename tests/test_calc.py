@@ -19,7 +19,7 @@ from app.calc import (
     compute_all_scenarios,
     compute_scenario,
     daily_sales_rate,
-    dispatch_batches,
+    dispatch_window,
     normalise_shares,
     round_up_to,
     sales_window_start,
@@ -559,30 +559,22 @@ class TestPromoAndWarehouseInScenario:
         assert res.skus[0].gap_target == 0
 
 
-class TestDispatchBatches:
-    def test_splits_a_fortnight_into_four_day_runs(self):
+class TestDispatchWindow:
+    def test_window_is_the_first_dispatch_days_of_the_promotion(self):
         w = PromoWindow(start=date(2026, 11, 16), end=date(2026, 11, 29), dispatch_days=4)
-        assert dispatch_batches(w) == [
-            (1, date(2026, 11, 16), date(2026, 11, 19)),
-            (2, date(2026, 11, 20), date(2026, 11, 23)),
-            (3, date(2026, 11, 24), date(2026, 11, 27)),
-            (4, date(2026, 11, 28), date(2026, 11, 29)),  # short tail
-        ]
+        assert dispatch_window(w) == (date(2026, 11, 16), date(2026, 11, 19))
 
-    def test_batches_cover_every_day_exactly_once(self):
-        w = PromoWindow(start=date(2026, 11, 1), end=date(2026, 11, 30), dispatch_days=7)
-        days = []
-        for _idx, start, end in dispatch_batches(w):
-            days.extend((end - start).days + 1 for _ in [0])
-        assert sum(days) == 30
-
-    def test_dispatch_longer_than_promotion_gives_one_batch(self):
+    def test_window_never_runs_past_the_promotion(self):
         w = PromoWindow(start=date(2026, 11, 16), end=date(2026, 11, 18), dispatch_days=4)
-        assert dispatch_batches(w) == [(1, date(2026, 11, 16), date(2026, 11, 18))]
+        assert dispatch_window(w) == (date(2026, 11, 16), date(2026, 11, 18))
 
-    def test_empty_window_has_no_batches(self):
+    def test_whole_promotion_is_one_window(self):
+        w = PromoWindow(start=date(2026, 11, 16), end=date(2026, 11, 19), dispatch_days=4)
+        assert dispatch_window(w) == (date(2026, 11, 16), date(2026, 11, 19))
+
+    def test_empty_window_has_no_dispatch(self):
         w = PromoWindow(start=date(2026, 11, 18), end=date(2026, 11, 16), dispatch_days=4)
-        assert dispatch_batches(w) == []
+        assert dispatch_window(w) is None
 
 
 class TestSharedTarget:
@@ -789,3 +781,129 @@ class TestSupplySource:
         row = compare_scenarios({"A": res})[0]
         assert row["scenarios"]["A"].po_qty == 100
         assert row["scenarios"]["A"].total_dispatch == 200
+
+
+class TestVendorFullPeriodTarget:
+    """A PO is raised once for the whole promotion, so 行貨 ignores the window.
+
+    The warehouse still only stocks the first ``dispatch_days`` days, so the
+    two routes are measured against different targets — the line says which.
+    """
+
+    PROMO = PromoWindow(
+        start=date(2026, 11, 17), end=date(2026, 11, 30), dispatch_days=4
+    )
+
+    def test_vendor_row_allocates_the_full_target_warehouse_stays_on_the_window(
+        self,
+    ):
+        # 1,400 over 14 days, 4-day dispatch => warehouse target 400, full 1,400.
+        res = compute_scenario(
+            "A",
+            ["V1", "W1"],
+            [0.5, 0.5],
+            [SkuTarget("K", 1400)],
+            {},
+            promo=self.PROMO,
+            supply_by_sku={"K": {"V1": "1", "W1": "2"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+
+        assert by_shop["V1"].alloc_qty == 700          # half of 1,400
+        assert by_shop["V1"].alloc_full_period is True
+        assert by_shop["V1"].po_qty == 700
+
+        assert by_shop["W1"].alloc_qty == 200          # half of 400
+        assert by_shop["W1"].alloc_full_period is False
+        assert by_shop["W1"].dispatch_qty == 200
+
+    def test_vendor_shop_with_one_hundred_percent_gets_the_whole_target(self):
+        res = compute_scenario(
+            "A",
+            ["V1"],
+            [1.0],
+            [SkuTarget("K", 1000)],
+            {},
+            promo=PromoWindow(
+                start=date(2026, 11, 17), end=date(2026, 11, 26), dispatch_days=4
+            ),
+            supply_by_sku={"K": {"V1": "4"}},
+        )
+        line = res.lines[0]
+        assert line.alloc_qty == 1000
+        assert line.po_qty == 1000                     # not 400
+        assert res.skus[0].dispatch_target == 400       # the window is still reported
+        assert res.skus[0].po_target == 1000
+
+    def test_vendor_stock_offsets_the_full_period_allocation(self):
+        res = compute_scenario(
+            "A",
+            ["V1"],
+            [1.0],
+            [SkuTarget("K", 1000)],
+            {"K": {"V1": 300}},
+            promo=self.PROMO,
+            supply_by_sku={"K": {"V1": "1"}},
+        )
+        assert res.lines[0].alloc_qty == 1000
+        assert res.lines[0].gap_qty == 700
+        assert res.lines[0].po_qty == 700
+
+    def test_vendor_po_still_rounds_up_to_moq(self):
+        res = compute_scenario(
+            "A",
+            ["V1"],
+            [1.0],
+            [SkuTarget("K", 1000)],
+            {},
+            promo=self.PROMO,
+            moq_by_sku={"K": 12},
+            supply_by_sku={"K": {"V1": "1"}},
+        )
+        assert res.lines[0].po_qty == 1008
+
+    def test_without_a_promotion_vendor_alloc_is_the_target_anyway(self):
+        res = compute_scenario(
+            "A",
+            ["V1", "W1"],
+            [0.5, 0.5],
+            [SkuTarget("K", 400)],
+            {},
+            supply_by_sku={"K": {"V1": "1", "W1": "2"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["V1"].alloc_qty == 200
+        assert by_shop["W1"].alloc_qty == 200
+
+    def test_warning_tells_the_buyer_the_po_is_for_the_whole_period(self):
+        res = compute_scenario(
+            "A",
+            ["V1", "W1"],
+            [0.5, 0.5],
+            [SkuTarget("K", 1400)],
+            {},
+            promo=self.PROMO,
+            supply_by_sku={"K": {"V1": "1", "W1": "2"}},
+        )
+        note = next(w for w in res.warnings if "行貨" in w)
+        assert "全期" in note
+        assert "14 日" in note
+        assert "4 日" in note
+
+    def test_group_po_target_adds_up_across_members(self):
+        targets = [
+            SkuTarget("P1", 100, group="P1"),
+            SkuTarget("P2", 240, group="P1"),
+        ]
+        res = compute_scenario(
+            "A",
+            ["V1"],
+            [1.0],
+            targets,
+            {"P1": {"V1": 0}, "P2": {"V1": 0}},
+            promo=self.PROMO,
+            supply_by_sku={"P1": {"V1": "1"}, "P2": {"V1": "1"}},
+        )
+        row = compare_scenarios({"A": res})[0]
+        assert row["scenarios"]["A"].po_target == 340
+        assert row["scenarios"]["A"].po_qty == 340

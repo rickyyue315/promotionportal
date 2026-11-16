@@ -95,8 +95,10 @@
         <span class="tag">規則</span>
         <span>
           <strong>行貨（1／4）</strong>：貨不經 D001，需求全數列為「需開 PO」，
-          要由 <strong>Buyer 開 PO</strong> 為店舖落單；不佔貨倉配額，亦不計入「倉存缺貨」。<br>
-          <strong>倉貨（2）</strong>：由 <strong>RP 開 STO</strong> 從 D001 取貨，受倉存上限限制。<br>
+          要由 <strong>Buyer 開 PO</strong> 為店舖落單；不佔貨倉配額，亦不計入「倉存缺貨」。
+          PO 覆蓋整段推廣，所以行貨店舖的分配數量用<strong>全期 Target</strong> 計算，<u>不受派貨日數縮小</u>。<br>
+          <strong>倉貨（2）</strong>：由 <strong>RP 開 STO</strong> 從 D001 取貨，受倉存上限限制，
+          分配數量只計首「派貨日數」的目標。<br>
           D001 自己的 Supply Source 一律忽略。
         </span>
       </div>

@@ -35,21 +35,25 @@
       {% elif params.promo_source %}
       <span class="badge neutral">畫面輸入</span>
       {% endif %}</div>
-    <div><span class="dim">每次派貨</span> <strong>{{ params.dispatch_days }} 日</strong>
+    <div><span class="dim">派貨日數</span> <strong>{{ params.dispatch_days }} 日</strong>
       <span class="dim">，派貨目標 = Target × {{ params.dispatch_days }}/{{ params.promo_days }}</span></div>
     <div><span class="dim">銷售數據截止</span> {{ params.as_of }}</div>
   </div>
-  {% if schedule %}
+  {% if dispatch %}
   <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px">
     <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center">
-      <span class="dim">派貨批次</span>
-      {% for idx, s, e in schedule %}
-      <span class="badge {{ 'ok' if today >= s and today <= e else 'neutral' }}">
-        第 {{ idx }} 批 · {{ s.strftime('%m-%d') }}–{{ e.strftime('%m-%d') }}
+      <span class="dim">派貨日期</span>
+      <span class="badge {{ 'ok' if dispatch.active else 'neutral' }}">
+        {{ dispatch.start.strftime('%Y-%m-%d') }} → {{ dispatch.end.strftime('%Y-%m-%d') }}
+        · {{ dispatch.days }} 日貨
       </span>
-      {% endfor %}
+      {% if dispatch.uncovered_days %}
+      <span class="dim">
+        推廣期餘下 {{ dispatch.uncovered_days }} 日（{{ dispatch.uncovered_start.strftime('%m-%d') }}–{{ dispatch.uncovered_end.strftime('%m-%d') }}）不派貨
+      </span>
+      {% endif %}
       <span class="dim" style="margin-left:4px">
-        今日 {{ today.strftime('%Y-%m-%d') }}{% if days_to_start is not none %}，距首批派貨 {{ days_to_start }} 日{% endif %}
+        今日 {{ today.strftime('%Y-%m-%d') }}{% if days_to_start is not none %}，距派貨 {{ days_to_start }} 日{% endif %}
       </span>
     </div>
   </div>
@@ -77,8 +81,8 @@
   </div>
   {% if po_any %}
   <div class="kpi">
-    <div class="label">需開 PO（行貨）</div>
-    <div class="value">{{ totals[best_dispatch].po_qty | num }}<small>件 · Buyer 落單</small></div>
+    <div class="label">需開 PO（行貨 · 全期）</div>
+    <div class="value">{{ totals[best_dispatch].po_qty | num }}<small>件 · 全期 Target，Buyer 落單</small></div>
   </div>
   {% endif %}
   {% endif %}
@@ -117,7 +121,7 @@
       </div>
       {% if t.po_qty %}
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
-        <span class="dim">　↳ 行貨：Buyer 開 PO</span>
+        <span class="dim" title="行貨按整段推廣的 Target 計算，不受派貨日數縮小">　↳ 行貨：Buyer 開 PO（全期）</span>
         <span class="num"><span class="badge warn">{{ t.po_qty | num }} 件</span></span>
       </div>
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
@@ -205,7 +209,7 @@
             <th rowspan="2">SKU</th>
             <th rowspan="2">名稱</th>
             <th class="num" rowspan="2">Target</th>
-            <th class="num" rowspan="2">派貨目標</th>
+            <th class="num" rowspan="2" title="Target 按派貨日數縮小後的總量；行貨店舖按全期 Target 分配，所以「開 PO」可能大於此數">派貨目標</th>
             <th class="num" rowspan="2">日銷</th>
             <th class="num" rowspan="2">預計銷量</th>
             <th class="num" rowspan="2">目標差距</th>
@@ -219,7 +223,7 @@
           <tr>
             {% for sc in scenarios if totals[sc].n_sku %}
             <th class="num" style="border-left:1px solid var(--border)">派貨</th>
-            {% if po_any %}<th class="num">開 PO</th>{% endif %}
+            {% if po_any %}<th class="num">開 PO（全期）</th>{% endif %}
             <th class="num">缺貨</th>
             {% endfor %}
           </tr>
@@ -253,7 +257,7 @@
               <td class="num" style="border-left:1px solid #f0f0ec">{{ s.total_dispatch | num if s else '—' }}</td>
               {% if po_any %}
               <td class="num">
-                {% if s and s.po_qty %}<span class="badge warn">{{ s.po_qty | num }}</span>
+                {% if s and s.po_qty %}<span class="badge warn" title="行貨按整段推廣的全期 Target 計算">{{ s.po_qty | num }}</span>
                 {% else %}<span class="dim">—</span>{% endif %}
               </td>
               {% endif %}
@@ -282,6 +286,8 @@
     {% if supply.codes %}
     <br>Supply Source {{ supply.codes | join('／') }} 屬行貨：要由 <strong>Buyer 開 PO</strong> 為店舖落單，
     不由 D001 出貨，所以不佔倉存、不計入「缺貨」；Supply Source 2（或其他代碼）屬倉貨，由 RP 開 STO 從 D001 取貨。
+    <br>行貨的 PO 覆蓋<strong>整段推廣</strong>，所以它的分配量用全期 Target 計算，不受「派貨日數」縮小；
+    倉貨仍只派首 {{ params.dispatch_days or '—' }} 日。同一 SKU 在行貨店與倉貨店會用不同基準，明細頁會逐行標明。
     {% elif not supply.has_column %}
     <br>庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）。
     {% endif %}

@@ -806,11 +806,11 @@ def run_result(request: Request, run_id: str):
     active = {sc: t for sc, t in totals.items() if t["n_sku"]}
     best_dispatch = min(active, key=lambda s: active[s]["total_dispatch"]) if active else None
 
-    schedule = _run_schedule(params)
     today = db.today()
+    dispatch = _run_dispatch(params, today)
     days_to_start = (
-        (schedule[0][1] - today).days
-        if schedule and today < schedule[0][1]
+        (dispatch["start"] - today).days
+        if dispatch and today < dispatch["start"]
         else None
     )
 
@@ -828,12 +828,12 @@ def run_result(request: Request, run_id: str):
         gate=_run_gate(params),
         best_dispatch=best_dispatch,
         n_short_total=sum(1 for r in compare_rows if r["shortfall_qty"] > 0),
-        schedule=schedule,
         today=today,
         days_to_start=days_to_start,
         keep_minutes=runstore.TTL_SECONDS // 60,
         po_any=any(t["po_qty"] for t in totals.values()),
         supply=_run_supply(params),
+        dispatch=dispatch,
     )
 
 
@@ -880,6 +880,7 @@ def run_detail(
         labels=_run_labels(run.params),
         gate=_run_gate(run.params),
         supply=_run_supply(run.params),
+        params=run.params,
         keep_minutes=runstore.TTL_SECONDS // 60,
     )
 
@@ -943,23 +944,37 @@ def _run_labels(params: dict) -> Dict[str, Any]:
     return db.scenario_labels()
 
 
-def _run_schedule(params: dict) -> List[tuple]:
-    """Dispatch runs for a batch, rebuilt from its own dates.
+def _run_dispatch(params: dict, today: date) -> Optional[dict]:
+    """The single dispatch run of a calculated batch, rebuilt from its own dates.
 
-    Stored rather than recomputed from today, so an old batch still shows the
-    dates it was planned for.
+    Rebuilt rather than recomputed from today, so an old batch still shows the
+    dates it was planned for. Only one run exists: the promotion is stocked for
+    its first ``dispatch_days`` days and not topped up afterwards, so anything
+    beyond that window is reported as unstocked rather than as a later batch.
     """
     start = _parse_date(params.get("promo_start", ""))
     end = _parse_date(params.get("promo_end", ""))
     if not start or not end or end < start:
-        return []
+        return None
     try:
         days = int(params.get("dispatch_days") or 4)
     except (TypeError, ValueError):
         days = 4
-    return calc.dispatch_batches(
-        calc.PromoWindow(start=start, end=end, dispatch_days=days)
-    )
+    promo = calc.PromoWindow(start=start, end=end, dispatch_days=days)
+    window = calc.dispatch_window(promo)
+    if window is None:
+        return None
+    win_start, win_end = window
+    uncovered = max((promo.end - win_end).days, 0)
+    return {
+        "start": win_start,
+        "end": win_end,
+        "days": promo.effective_dispatch_days,
+        "active": win_start <= today <= win_end,
+        "uncovered_days": uncovered,
+        "uncovered_start": win_end + timedelta(days=1) if uncovered else None,
+        "uncovered_end": promo.end,
+    }
 
 
 def _run_gate(params: dict) -> List[str]:
@@ -996,7 +1011,7 @@ def _totals(res) -> Dict[str, int]:
         "target_qty", "dispatch_target", "total_stock", "total_pending",
         "warehouse_qty", "warehouse_pending", "total_dispatch", "need_qty",
         "short_qty", "blocked_qty", "expected_sales", "gap_target",
-        "shortfall_qty", "surplus_qty", "po_qty", "sto_qty",
+        "shortfall_qty", "surplus_qty", "po_qty", "sto_qty", "po_target",
     )
     if res is None:
         out = {k: 0 for k in keys}

@@ -57,6 +57,13 @@ they can be short of it. Vendor needs are reported as ``po_qty`` — a worklist
 for the buyer — while ``total_dispatch`` still counts everything the shop
 receives, whichever route it takes.
 
+The two routes also answer to different targets. A PO is raised once for the
+whole promotion, so a vendor shop is allocated its share of the full target
+however few days D001 sends out; a warehouse shop is still measured against
+the dispatch window. That is why ``Line.alloc_qty`` can exceed the scaled
+``dispatch_target``: the line is flagged with ``alloc_full_period`` so the
+report can say which basis it used rather than mixing the two silently.
+
 A stock file with no Supply source column — or a blank cell, or a code we do
 not recognise — is treated as warehouse, i.e. exactly the behaviour before this
 rule existed; the run warns when that fallback is used.
@@ -196,6 +203,7 @@ class Line:
     supply_source: str = ""
     supply_mode: str = SUPPLY_WAREHOUSE
     po_qty: int = 0
+    alloc_full_period: bool = False
 
     @property
     def on_hand(self) -> int:
@@ -239,6 +247,7 @@ class SkuSummary:
     gap_supply: int = 0
     group: str = ""
     po_qty: int = 0
+    po_target: int = 0
 
     @property
     def enough(self) -> bool:
@@ -533,25 +542,21 @@ def daily_sales_rate(sales: ShopSales, as_of: Optional[date]) -> float:
     return sold / days
 
 
-def dispatch_batches(promo: PromoWindow) -> List[Tuple[int, date, date]]:
-    """Split the promotion into consecutive dispatch runs.
+def dispatch_window(promo: PromoWindow) -> Optional[Tuple[date, date]]:
+    """The one dispatch run of the promotion: its first ``dispatch_days`` days.
 
-    Each run covers ``dispatch_days`` days of selling (the last one may be
-    shorter). These are the dates a shop is expected to be stocked for; the
-    warehouse still needs its own lead time, which we do not assume.
+    Only the first few days of stock are sent, so there is exactly one run —
+    not a series of top-ups. Clamping to ``effective_dispatch_days`` keeps the
+    window inside the promotion when dispatch_days exceeds its length.
+
+    These are the selling dates the stock is meant to cover; the warehouse
+    still needs its own lead time, which we do not assume.
     """
     if promo.days <= 0:
-        return []
-    step = max(promo.effective_dispatch_days, 1)
-    out: List[Tuple[int, date, date]] = []
-    day = promo.start
-    index = 1
-    while day <= promo.end:
-        end = min(day + timedelta(days=step - 1), promo.end)
-        out.append((index, day, end))
-        day = end + timedelta(days=1)
-        index += 1
-    return out
+        return None
+    start = promo.start
+    end = start + timedelta(days=promo.effective_dispatch_days - 1)
+    return start, end
 
 
 def cap_to_available(
@@ -709,7 +714,9 @@ def compute_scenario(
     can be sent. ``moq_by_sku`` comes from the stock file (SKU × shop): it is
     what rounds each shop's need up, and the target file has no say in it.
     ``supply_by_sku`` maps SKU -> shop -> ``Supply source`` code; only
-    ``vendor_sources`` codes are supplied by PO instead of from D001.
+    ``vendor_sources`` codes are supplied by PO instead of from D001, and those
+    rows are allocated against the full promotion target — a PO covers the whole
+    period, the warehouse only the dispatch window.
     """
     warn = list(warnings or [])
     lines: List[Line] = []
@@ -758,14 +765,18 @@ def compute_scenario(
         per_shop_sales = sales_map.get(target.sku, {})
         moq = sku_moq(moq_by_sku, target.sku)
 
-        # Only the first few days of the target are sent out; the rest is
-        # replenished later, so it must not inflate this round of dispatch.
+        # Only the first few days of the target are sent out from D001, so the
+        # promotion target is scaled down to the dispatch window before it is
+        # split across shops. 行貨 is the exception: the buyer raises one PO for
+        # the whole promotion, so a vendor shop is allocated its share of the
+        # full target however few days the warehouse dispatch covers.
         dispatch_target = (
             promo.dispatch_target(target.target_qty)
             if promo is not None
             else target.target_qty
         )
-        allocs = apportion(dispatch_target, shares)
+        window_allocs = apportion(dispatch_target, shares)
+        full_allocs = apportion(target.target_qty, shares)
 
         available = (
             int(round(warehouse[target.sku]))
@@ -775,11 +786,19 @@ def compute_scenario(
 
         per_shop_supply = supply_map.get(target.sku, {})
         rows: List[dict] = []
-        for shop, share, alloc in zip(shops, shares, allocs):
+        for shop, share, window_alloc, full_alloc in zip(
+            shops, shares, window_allocs, full_allocs
+        ):
             stock = int(round(float(per_shop_stock.get(shop, 0) or 0)))
             sales = per_shop_sales.get(shop) or ShopSales()
             pending = int(sales.pending_qty or 0)
             on_hand = stock + pending
+
+            code = supply_code(per_shop_supply.get(shop, ""))
+            mode = supply_mode(code, vendors)
+            vendor = mode == SUPPLY_VENDOR
+            # The route decides which target this shop is measured against.
+            alloc = full_alloc if vendor else window_alloc
 
             gap = alloc - on_hand
             need = round_up_to(gap, moq) if gap > 0 else 0
@@ -791,9 +810,7 @@ def compute_scenario(
             gated = bool(gate) and shop.upper() in gate and rp_type != RP_DISPATCHABLE
             blocked = gated and need > 0
 
-            code = supply_code(per_shop_supply.get(shop, ""))
-            mode = supply_mode(code, vendors)
-            if mode == SUPPLY_VENDOR:
+            if vendor:
                 vendor_shops.add(shop)
             elif code and code.upper() != "2" and code.upper() not in vendors:
                 odd_sources.add(code)
@@ -813,7 +830,7 @@ def compute_scenario(
                     "blocked": blocked,
                     "surplus": max(stock - alloc, 0),
                     "supply_source": code,
-                    "vendor": mode == SUPPLY_VENDOR,
+                    "vendor": vendor,
                 }
             )
 
@@ -830,7 +847,7 @@ def compute_scenario(
             {
                 "target": target,
                 "rows": rows,
-                "allocs": allocs,
+                "allocs": [r["alloc"] for r in rows],
                 "dispatch_target": dispatch_target,
                 "moq": moq,
                 "available": available,
@@ -874,6 +891,7 @@ def compute_scenario(
         total_expected = 0
         total_rate = 0.0
         total_po = 0
+        total_po_target = 0
         total_short = 0
         surplus = 0
         needing = 0
@@ -897,6 +915,10 @@ def compute_scenario(
                 continue
 
             po = dispatch if row["vendor"] else 0
+            if row["vendor"]:
+                # What the buyer is being asked for over the whole promotion,
+                # not just the days the warehouse covers.
+                total_po_target += row["alloc"]
 
             total_stock += row["stock"]
             total_pending += row["pending"]
@@ -952,6 +974,7 @@ def compute_scenario(
                         SUPPLY_VENDOR if row["vendor"] else SUPPLY_WAREHOUSE
                     ),
                     po_qty=po,
+                    alloc_full_period=row["vendor"],
                 )
             )
 
@@ -988,6 +1011,7 @@ def compute_scenario(
                 gap_supply=target.target_qty - (total_stock + total_pending + total_dispatch),
                 group=target.group,
                 po_qty=total_po,
+                po_target=total_po_target,
             )
         )
 
@@ -1004,11 +1028,21 @@ def compute_scenario(
             + "ND 或未提供一律 0 件）"
         )
     if po_units:
+        short_window = (
+            promo is not None and promo.effective_dispatch_days < promo.days
+        )
         warn.append(
             "Supply Source "
             + "／".join(sorted(vendors))
             + f" 屬行貨：{len(vendor_shops)} 間店舖共 {po_units:,} 件需由 Buyer 開 PO 落單，"
-            + "已不佔 D001 倉存、不計入倉存缺貨（"
+            + "已不佔 D001 倉存、不計入倉存缺貨"
+            + (
+                f"；行貨需求按全期 Target（{promo.days} 日）計算，"
+                f"不受派貨日數（{promo.effective_dispatch_days} 日）限制"
+                if short_window
+                else ""
+            )
+            + "（"
             + "、".join(sorted(vendor_shops)[:6])
             + ("…" if len(vendor_shops) > 6 else "")
             + "）"
@@ -1085,7 +1119,7 @@ _GROUP_SUM_FIELDS = (
     "target_qty", "total_alloc", "total_stock", "total_dispatch", "surplus_qty",
     "shortfall_qty", "n_shops_needing", "dispatch_target", "total_pending",
     "warehouse_qty", "warehouse_pending", "expected_sales", "gap_target",
-    "need_qty", "short_qty", "blocked_qty", "gap_supply", "po_qty",
+    "need_qty", "short_qty", "blocked_qty", "gap_supply", "po_qty", "po_target",
 )
 
 

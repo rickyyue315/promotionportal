@@ -856,13 +856,105 @@ def test_supply_source_sends_vendor_shops_to_a_po(client):
 
     wb2 = load_workbook(io.BytesIO(export.content), read_only=True)
     compare_head = [c for c in next(wb2["比較"].iter_rows(values_only=True))]
-    # Per scenario, because the PO quantity follows the share mix.
-    assert "A 開 PO" in compare_head
+    # Per scenario, because the PO quantity follows the share mix. The header
+    # says 全期: a PO covers the whole promotion, not the dispatch window.
+    assert "A 開 PO（全期）" in compare_head
     assert "開 PO" not in compare_head
     detail_head = [c for c in next(wb2["明細_A"].iter_rows(values_only=True))]
     assert "Supply Source" in detail_head
     assert "可派 STO" in detail_head
-    assert "開 PO" in detail_head
+    assert "開 PO（全期）" in detail_head
+    assert "分配基準" in detail_head
+    wb2.close()
+
+
+def test_vendor_po_covers_the_whole_promotion(client):
+    """A 4-day dispatch still buys the full period for a vendor shop.
+
+    The buyer raises one PO for the whole promotion, so the vendor shop is
+    measured against the full target while the warehouse shop is not.
+    """
+    period = "2027-05"
+    sku = "111058304001"
+
+    db.upsert_shop("HB01", "HB01 倉貨店", "HK")
+    db.upsert_shop("HB02", "HB02 行貨店", "HK")
+    db.save_shares(period, "A", {"HB01": 0.5, "HB02": 0.5}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "精華", 1200])
+    target = io.BytesIO()
+    wb.save(target)
+
+    stock = _sap_supply_bytes(
+        [
+            (sku, "精華", "D001", "2", 300),
+            (sku, "精華", "HB01", "2", 0),
+            (sku, "精華", "HB02", "4", 0),   # 行貨
+        ]
+    )
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2026-11-02",
+            "promo_end": "2026-11-13",      # 12 days
+            "dispatch_days": "4",           # but only 4 days are sent
+        },
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    lines = {ln.shop_code: ln for ln in run.results["A"].lines}
+
+    vendor = lines["HB02"]
+    assert vendor.vendor is True
+    assert vendor.alloc_full_period is True
+    assert vendor.alloc_qty == 600            # half of the whole 1,200
+    assert vendor.po_qty == 600
+
+    warehouse = lines["HB01"]
+    assert warehouse.alloc_full_period is False
+    assert warehouse.alloc_qty == 200         # half of 1,200 × 4/12
+    assert warehouse.dispatch_qty == 200      # D001 has 300, so nothing short
+
+    summary = run.results["A"].skus[0]
+    assert summary.po_qty == 600
+    assert summary.po_target == 600
+    assert summary.dispatch_target == 400
+    assert any("全期" in w for w in run.params["warnings"]["A"])
+
+    page = client.get(f"/run/{token}")
+    assert page.status_code == 200
+    assert "需開 PO（行貨 · 全期）" in page.text
+
+    detail = client.get(f"/run/{token}/detail?scenario=A&sku={sku}")
+    assert detail.status_code == 200
+    assert "行貨全期目標" in detail.text
+    assert "全期" in detail.text
+
+    export = client.get(f"/run/{token}/export.xlsx")
+    from openpyxl import load_workbook
+
+    wb2 = load_workbook(io.BytesIO(export.content), read_only=True)
+    rows = list(wb2["明細_A"].iter_rows(values_only=True))
+    head = list(rows[0])
+    basis = head.index("分配基準")
+    by_shop = {r[2]: r for r in rows[1:]}
+    assert by_shop["HB02"][basis] == "全期"
+    assert by_shop["HB01"][basis] == "派貨期"
     wb2.close()
 
 

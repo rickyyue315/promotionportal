@@ -258,8 +258,10 @@ def _supply_demo(client: TestClient) -> str:
         "/run/new",
         data={
             "period": period,
+            # 12-day promotion, 4-day dispatch: the warehouse shops are only
+            # stocked for four days while the 行貨 shop's PO covers the lot.
             "promo_start": "2027-06-01",
-            "promo_end": "2027-06-04",
+            "promo_end": "2027-06-12",
             "dispatch_days": "4",
         },
         files={
