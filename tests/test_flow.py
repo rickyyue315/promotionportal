@@ -723,3 +723,180 @@ def test_shared_target_flows_through_to_the_result(client):
     assert compare[2] == 4000
     params = [row for row in book["參數"].iter_rows(values_only=True)]
     assert any(row[0] == "共用 Target" for row in params)
+
+
+def _sap_supply_bytes(rows) -> bytes:
+    """SAP export carrying Supply source, the column that picks the route."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "Article", "Article Description", "Site", "Supply source",
+            "RP Type", "SaSa Net Stock", "Pending Received",
+            "Last Month Sold Qty", "MTD Sold Qty",
+        ]
+    )
+    for sku, desc, site, source, qty in rows:
+        ws.append([sku, desc, site, source, "RF", qty, 0, 0, 0])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_supply_source_sends_vendor_shops_to_a_po(client):
+    """1／4 行貨 goes on a PO; only the warehouse shop competes for D001."""
+    period = "2027-04"
+    sku = "111058303001"
+
+    db.upsert_shop("HA01", "HA01 倉貨店", "HK")
+    db.upsert_shop("HA02", "HA02 行貨店", "HK")
+    db.save_shares(period, "A", {"HA01": 0.5, "HA02": 0.5}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 200])
+    target = io.BytesIO()
+    wb.save(target)
+
+    stock = _sap_supply_bytes(
+        [
+            # D001 holds 100 — exactly enough for the warehouse shop's half.
+            (sku, "面膜", "D001", "2", 100),
+            (sku, "面膜", "HA01", "2", 0),
+            (sku, "面膜", "HA02", "1", 0),   # 行貨
+        ]
+    )
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    assert resp.headers["location"].startswith("/run/"), resp.headers["location"]
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run.params["has_supply_source"] is True
+    assert run.params["vendor_supply_sources"] == ["1", "4"]
+
+    lines = {ln.shop_code: ln for ln in run.results["A"].lines}
+    vendor = lines["HA02"]
+    assert vendor.vendor is True
+    assert vendor.supply_source == "1"
+    assert vendor.po_qty == 100          # full need, not limited by D001
+    assert vendor.sto_qty == 0
+    assert vendor.short_qty == 0
+
+    warehouse = lines["HA01"]
+    assert warehouse.vendor is False
+    assert warehouse.po_qty == 0
+    assert warehouse.dispatch_qty == 100  # D001 not shared with the vendor shop
+
+    summary = run.results["A"].skus[0]
+    assert summary.po_qty == 100
+    assert summary.sto_qty == 100
+    assert summary.total_dispatch == 200
+    assert summary.short_qty == 0
+    assert any("開 PO" in w for w in run.params["warnings"]["A"])
+
+    page = client.get(f"/run/{token}")
+    assert page.status_code == 200
+    assert "需開 PO" in page.text
+    assert "行貨" in page.text
+
+    detail = client.get(f"/run/{token}/detail?scenario=A&sku={sku}")
+    assert detail.status_code == 200
+    assert "貨源" in detail.text
+    assert "HA02" in detail.text
+
+    export = client.get(f"/run/{token}/export.xlsx")
+    assert export.status_code == 200
+    from openpyxl import load_workbook
+
+    wb2 = load_workbook(io.BytesIO(export.content), read_only=True)
+    compare_head = [c for c in next(wb2["比較"].iter_rows(values_only=True))]
+    # Per scenario, because the PO quantity follows the share mix.
+    assert "A 開 PO" in compare_head
+    assert "開 PO" not in compare_head
+    detail_head = [c for c in next(wb2["明細_A"].iter_rows(values_only=True))]
+    assert "Supply Source" in detail_head
+    assert "可派 STO" in detail_head
+    assert "開 PO" in detail_head
+    wb2.close()
+
+
+def test_supply_source_column_missing_is_reported(client):
+    """No column: every shop is 倉貨 and the page says so, rather than assuming."""
+    period = "2027-05"
+    sku = "111058303002"
+
+    db.upsert_shop("HA03", "HA03", "HK")
+    db.save_shares(period, "A", {"HA03": 1.0}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 60])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Article", "Site", "SaSa Net Stock", "RP Type", "MOQ"])
+    ws.append([sku, "HA03", 0, "RF", 6])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run.params["has_supply_source"] is False
+    assert run.params["vendor_supply_sources"] == []
+    assert run.results["A"].skus[0].po_qty == 0
+    assert any("沒有 Supply Source 欄位" in w for w in run.params["warnings"]["A"])
+
+
+def test_supply_source_codes_are_configurable(client):
+    login(client, "adminpw", "Ricky")
+    try:
+        resp = client.post(
+            "/admin/settings",
+            data={
+                "label_A": "恆常推廣", "label_B": "精彩價&PIP", "label_C": "",
+                "warehouse_sites": "D001",
+                "rp_gate_shops": "HB87",
+                "vendor_supply_sources": "1,4,5",
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text
+        assert db.vendor_supply_sources() == ["1", "4", "5"]
+        page = client.get("/admin/settings")
+        assert "1,4,5" in page.text
+    finally:
+        db.set_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY)
+    assert db.vendor_supply_sources() == ["1", "4"]

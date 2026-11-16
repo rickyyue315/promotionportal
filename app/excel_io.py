@@ -19,6 +19,8 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
 from openpyxl.styles import Font, PatternFill
 
+from .calc import supply_code
+
 SHOP_RE = re.compile(r"^[A-Z]{1,4}\d{1,4}[A-Z0-9]{0,2}$")
 
 SKU_KEYS = ("sku", "article", "item", "product code", "貨號", "產品編號", "貨品編號", "編號")
@@ -52,6 +54,7 @@ STOCK_REJECT = (
     "quality",
 )
 RP_KEYS = ("rp type", "rp_type", "rp code", "rp")
+SUPPLY_KEYS = ("supply source", "supply_source", "supplysource", "source of supply", "貨源", "供應來源")
 PENDING_KEYS = ("pending received", "pending", "在途")
 LAST_MONTH_KEYS = ("last month sold qty", "last month sold", "上月銷量", "上月銷售")
 MTD_KEYS = ("mtd sold qty", "mtd sold", "本月銷量", "本月銷售")
@@ -164,7 +167,8 @@ class StockRow:
     quantities we act on. The sales figures are rates fuel for the 4-day cover
     calculation, not stock. ``moq`` rides along because the minimum order is a
     packaging property of the SKU, which SAP keeps on this row rather than on
-    the target list.
+    the target list. ``supply_source`` says who supplies the shop — 1／4 行貨
+    (buyer's PO) or 2 倉貨 (STO from D001) — so the row can be routed correctly.
     """
 
     sku: str
@@ -176,6 +180,7 @@ class StockRow:
     mtd_sold: int = 0
     launch_date: Optional[date] = None
     moq: int = 1
+    supply_source: str = ""
 
 
 @dataclass(frozen=True)
@@ -401,6 +406,9 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
     i_mtd = _find(headers, MTD_KEYS, exclude={i_sku, i_shop, i_stock, i_rp})
     i_launch = _find(headers, LAUNCH_KEYS, exclude={i_sku, i_shop, i_stock, i_rp})
     i_moq = _find(headers, MOQ_KEYS, exclude={i_sku, i_shop, i_stock})
+    i_supply = _find(
+        headers, SUPPLY_KEYS, exclude={i_sku, i_shop, i_stock, i_rp, i_moq}
+    )
 
     # Is it a wide pivot (one column per shop)?
     shop_cols = [
@@ -455,6 +463,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             "mtd_sold": original[i_mtd] if i_mtd is not None else "",
             "launch_date": original[i_launch] if i_launch is not None else "",
             "moq": original[i_moq] if i_moq is not None else "",
+            "supply_source": original[i_supply] if i_supply is not None else "",
         }
         out.warnings.append("偵測為長表格式（每行一個 SKU × 店舖）")
         pairs2: Dict[Tuple[str, str], int] = {}
@@ -464,6 +473,8 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         sales_map: Dict[Tuple[str, str], Tuple[int, int]] = {}
         launch_map: Dict[Tuple[str, str], date] = {}
         moq_map: Dict[Tuple[str, str], int] = {}
+        supply_map: Dict[Tuple[str, str], str] = {}
+        supply_conflict = set()
         dup2 = set()
         bad = 0
         for offset, row in enumerate(body, start=h + 2):
@@ -521,6 +532,20 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
                         rp_conflict.add(f"{sku}@{shop}")
                         rp_map[key] = ""
 
+            if i_supply is not None and i_supply < len(row):
+                # Kept as text: SAP writes 2 as a number in some exports and as
+                # text in others, and the route must not depend on cell format.
+                code = supply_code(row[i_supply])
+                if code:
+                    prev = supply_map.get(key, "")
+                    if not prev:
+                        supply_map[key] = code
+                    elif prev != code:
+                        # Two routes for one SKU × shop: pick the warehouse so
+                        # the goods still come from somewhere, and say so.
+                        supply_conflict.add(f"{sku}@{shop}")
+                        supply_map[key] = "2"
+
         if dup2:
             out.warnings.append(
                 "同一 SKU 同一店舖出現多於一次，已相加：" + "、".join(sorted(dup2)[:5])
@@ -529,6 +554,11 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             out.warnings.append(
                 "以下 SKU × 店舖有多個不同的 RP Type，已當作未提供："
                 + "、".join(sorted(rp_conflict)[:5])
+            )
+        if supply_conflict:
+            out.warnings.append(
+                "以下 SKU × 店舖的 Supply Source 不一致，已當作倉貨（D001 出 STO）："
+                + "、".join(sorted(supply_conflict)[:5])
             )
         if bad:
             out.warnings.append(f"有 {bad} 行的庫存不是數字，已略過")
@@ -543,6 +573,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
                 mtd_sold=sales_map.get((sku, shop), (0, 0))[1],
                 launch_date=launch_map.get((sku, shop)),
                 moq=moq_map.get((sku, shop), 1),
+                supply_source=supply_map.get((sku, shop), ""),
             )
             for (sku, shop), qty in pairs2.items()
         ]
@@ -731,8 +762,10 @@ def export_run(
         "倉存", "倉存在途", "日銷", "預計銷量", "目標差距", "貨源缺口",
         "RP 不派", "夠貨",
     ]
+    # 開 PO sits inside the scenario block because it moves with the share mix,
+    # unlike 派貨目標 or 日銷 which are the same for A/B/C.
     for sc in scenarios:
-        headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 缺貨"]
+        headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO", f"{sc} 缺貨"]
     _put_header(ws, headers)
 
     for row in compare_rows:
@@ -758,6 +791,7 @@ def export_run(
             line += [
                 s.need_qty if s else 0,
                 s.total_dispatch if s else 0,
+                s.po_qty if s else 0,
                 s.short_qty if s else 0,
             ]
         ws.append(line)
@@ -772,8 +806,9 @@ def export_run(
         _put_header(
             ws2,
             [
-                "SKU", "貨品名稱", "店舖", "佔比", "分配數量", "現有庫存",
-                "在途", "可用", "差距", "MOQ", "需求", "可派", "缺貨",
+                "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "佔比",
+                "分配數量", "現有庫存", "在途", "可用", "差距", "MOQ",
+                "需求", "可派 STO", "開 PO", "缺貨",
                 "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
             ],
         )
@@ -789,6 +824,8 @@ def export_run(
                     ln.sku,
                     desc_of.get(ln.sku, ""),
                     ln.shop_code,
+                    "行貨" if ln.vendor else "倉貨",
+                    ln.supply_source,
                     round(ln.share_pct, 6),
                     ln.alloc_qty,
                     ln.stock_qty,
@@ -797,7 +834,8 @@ def export_run(
                     ln.gap_qty,
                     moq_of.get(ln.sku, 1),
                     ln.need_qty,
-                    ln.dispatch_qty,
+                    ln.sto_qty,
+                    ln.po_qty,
                     ln.short_qty,
                     round(ln.daily_rate, 2),
                     ln.expected_sales,
@@ -842,6 +880,19 @@ def export_run(
     if gate:
         ws3.append(["RP Type 管制店舖", "、".join(sorted(gate))])
         ws3.append(["RP Type 規則", "只有 RP Type = RF 才派貨；ND 或未提供一律 0 件"])
+    if params.get("vendor_supply_sources"):
+        ws3.append(
+            ["行貨 Supply Source", "、".join(params["vendor_supply_sources"])]
+        )
+        ws3.append(
+            [
+                "Supply Source 規則",
+                "行貨由 Buyer 開 PO，不佔 D001 倉存、不計入缺貨；"
+                "2（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
+            ]
+        )
+    elif params.get("has_supply_source") is False:
+        ws3.append(["Supply Source", "庫存檔沒有此欄，全部店舖當作倉貨（D001 出 STO）"])
     for sc in scenarios:
         res = results.get(sc)
         if res:
@@ -942,6 +993,12 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["或改成三欄長表：SKU / 店舖 / 庫存，系統會自動辨識"])
     note.append(["長表可加一欄 RP Type（例如 ND / RF）；HB87 只有 RF 才派貨，其餘店舖不看這欄"])
     note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
+    note.append(
+        [
+            "長表可加一欄 Supply Source；1／4 是行貨（Buyer 開 PO，不佔 D001 倉存），"
+            "2 是倉貨（RP 由 D001 開 STO）",
+        ]
+    )
     note.append(["SAP 匯出的明細（Article / Site / SaSa Net Stock / RP Type / MOQ）可直接上載"])
     return _save(wb)
 

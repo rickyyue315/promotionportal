@@ -201,6 +201,76 @@ def _shared_demo(client: TestClient) -> str:
     return resp.headers["location"].rstrip("/").split("/")[-1]
 
 
+def _supply_demo(client: TestClient) -> str:
+    """One 行貨 shop among 倉貨 shops: PO worklist next to the STO dispatch."""
+    from openpyxl import Workbook
+
+    period = "2027-06"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shares"
+    ws.append(["Shop", "店舖名稱", "A"])
+    ws.append(["HA01", "HA01 門市", 0.4])
+    ws.append(["HA02", "HA02 門市", 0.3])
+    ws.append(["HA03", "HA03 行貨店", 0.3])
+    buf = io.BytesIO()
+    wb.save(buf)
+    client.post(
+        "/admin/shares/import",
+        data={"period": period},
+        files={"file": ("shares.xlsx", buf.getvalue())},
+        follow_redirects=False,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "抗痘面膜 7片", 600])
+    ws.append(["111058302002", "保濕精華 30ml", 300])
+    tbuf = io.BytesIO()
+    wb.save(tbuf)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        ["Article", "Article Description", "Site", "Supply source",
+         "RP Type", "SaSa Net Stock", "Pending Received", "MOQ"]
+    )
+    # D001 holds 200, far less than the two 倉貨 shops need; HA03 is 行貨 and
+    # therefore does not compete for it.
+    rows = [
+        ("111058302001", "抗痘面膜 7片", "D001", "2", "ND", 200, 0, 6),
+        ("111058302001", "抗痘面膜 7片", "HA01", "2", "RF", 0, 0, 6),
+        ("111058302001", "抗痘面膜 7片", "HA02", "2", "RF", 0, 0, 6),
+        ("111058302001", "抗痘面膜 7片", "HA03", "1", "RF", 0, 0, 6),
+        ("111058302002", "保濕精華 30ml", "D001", "2", "ND", 400, 0, 6),
+        ("111058302002", "保濕精華 30ml", "HA01", "2", "RF", 20, 0, 6),
+        ("111058302002", "保濕精華 30ml", "HA02", "2", "RF", 0, 0, 6),
+        ("111058302002", "保濕精華 30ml", "HA03", "4", "RF", 0, 0, 6),
+    ]
+    for row in rows:
+        ws.append(list(row))
+    sbuf = io.BytesIO()
+    wb.save(sbuf)
+
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-06-01",
+            "promo_end": "2027-06-04",
+            "dispatch_days": "4",
+        },
+        files={
+            "target_file": ("target.xlsx", tbuf.getvalue()),
+            "stock_file": ("stock.xlsx", sbuf.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    return resp.headers["location"].rstrip("/").split("/")[-1]
+
+
 def main() -> None:
     samples = ROOT / "samples"
     with TestClient(app) as c:
@@ -231,7 +301,7 @@ def main() -> None:
         print("rendering:")
         shoot(c, "/", "01_dashboard", 1250)
         shoot(c, "/admin/shares?period=2026-11&scenario=B", "02_shares", 1250)
-        shoot(c, "/run/new?period=2026-11", "03_upload", 1150)
+        shoot(c, "/run/new?period=2026-11", "03_upload", 1280)
         shoot(c, f"/run/{run_id}", "04_result", 1500)
         shoot(c, f"/run/{run_id}/detail?scenario=A", "05_detail_shops", 1300)
         shoot(c, f"/run/{run_id}/detail?scenario=A&sku=111888009033", "06_detail_sku", 1300)
@@ -241,7 +311,7 @@ def main() -> None:
         # A month that exercises the HB87 RP Type rule on its own. It also puts
         # HB87 into the shop master, so the settings page no longer warns.
         hb_run = _hb87_demo(c)
-        shoot(c, "/admin/settings", "10_settings", 1100)
+        shoot(c, "/admin/settings", "10_settings", 1500)
         shoot(c, f"/run/{hb_run}", "11_result_hb87", 1400)
         shoot(c, f"/run/{hb_run}/detail?scenario=A&sku=111058302001", "12_detail_hb87", 1500)
 
@@ -252,6 +322,16 @@ def main() -> None:
             c,
             f"/run/{shared_run}/detail?scenario=A&sku=111058302002",
             "14_detail_shared",
+            1300,
+        )
+
+        # 行貨 (Supply source 1／4) next to 倉貨: the PO worklist.
+        supply_run = _supply_demo(c)
+        shoot(c, f"/run/{supply_run}", "15_result_supply", 1600)
+        shoot(
+            c,
+            f"/run/{supply_run}/detail?scenario=A&sku=111058302001",
+            "16_detail_supply",
             1300,
         )
 

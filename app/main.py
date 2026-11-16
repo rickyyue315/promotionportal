@@ -258,6 +258,7 @@ def settings_page(request: Request):
         meta=db.scenario_settings(),
         gate_raw=db.get_setting(db.RP_GATE_KEY, db.DEFAULT_RP_GATE),
         warehouse_raw=db.get_setting(db.WAREHOUSE_KEY, db.DEFAULT_WAREHOUSE),
+        supply_raw=db.get_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY),
         shop_codes={s["code"] for s in db.list_shops()},
         storage=db.storage_status(),
     )
@@ -283,11 +284,22 @@ async def settings_save(request: Request):
     warehouse_raw = str(form.get("warehouse_sites", "")).strip()
     db.set_setting(db.WAREHOUSE_KEY, warehouse_raw)
 
-    notes = ["已儲存餐別名稱、貨倉與 RP Type 規則"]
+    # Only touched when the form actually carries the field: an older cached
+    # page (or a test posting the previous field set) must not blank the rule.
+    if "vendor_supply_sources" in form:
+        db.set_setting(
+            db.SUPPLY_KEY, str(form.get("vendor_supply_sources", "")).strip()
+        )
+
+    notes = ["已儲存餐別名稱、貨倉、RP Type 與 Supply Source 規則"]
     level = "ok"
 
     if not db.warehouse_sites():
         notes.append("貨倉代碼留空，派貨將不受倉存限制")
+        level = "warn"
+
+    if not db.vendor_supply_sources():
+        notes.append("Supply Source 行貨代碼留空，所有店舖都會當作倉貨（D001 出 STO）")
         level = "warn"
 
     known = {s["code"] for s in db.list_shops()}
@@ -559,6 +571,7 @@ async def run_create(
     stock_by_sku: Dict[str, Dict[str, int]] = {}
     rp_by_sku: Dict[str, Dict[str, str]] = {}
     sales_by_sku: Dict[str, Dict[str, calc.ShopSales]] = {}
+    supply_by_sku: Dict[str, Dict[str, str]] = {}
     warehouse_by_sku: Dict[str, int] = {}
     warehouse_pending: Dict[str, int] = {}
     # MOQ is a SKU property carried on the stock file; when shops disagree the
@@ -583,6 +596,10 @@ async def run_create(
         stock_by_sku.setdefault(row.sku, {})[row.shop] = row.qty
         if row.rp_type:
             rp_by_sku.setdefault(row.sku, {})[row.shop] = row.rp_type
+        # Supply source decides the route, so it is kept per SKU × shop; the
+        # warehouse's own row is skipped above — 忽視 D001.
+        if row.supply_source:
+            supply_by_sku.setdefault(row.sku, {})[row.shop] = row.supply_source
         sales_by_sku.setdefault(row.sku, {})[row.shop] = calc.ShopSales(
             last_month_sold=row.last_month_sold,
             mtd_sold=row.mtd_sold,
@@ -626,6 +643,8 @@ async def run_create(
     shop_set = set(shops)
     gate = [code for code in db.rp_gate_shops() if code in shop_set]
     has_warehouse = bool(warehouse_by_sku)
+    has_supply = bool(parsed_s.mapped.get("supply_source"))
+    vendors = db.vendor_supply_sources()
 
     results = calc.compute_all_scenarios(
         shares,
@@ -640,6 +659,8 @@ async def run_create(
         warehouse_by_sku=warehouse_by_sku if has_warehouse else None,
         warehouse_pending_by_sku=warehouse_pending,
         moq_by_sku=moq_by_sku,
+        supply_by_sku=supply_by_sku,
+        vendor_sources=vendors,
     )
 
     gate_set = set(gate)
@@ -664,6 +685,13 @@ async def run_create(
         for res in results.values():
             res.warnings.append(
                 "庫存檔沒有 Last Month Sold Qty／MTD Sold Qty，未計算推廣期預計銷量與銷售差距"
+            )
+
+    if parsed_s.rows and not has_supply:
+        for res in results.values():
+            res.warnings.append(
+                "庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）；"
+                "如有行貨店舖，請在檔案加一欄 Supply Source（1／4 行貨、2 倉貨）"
             )
 
     if parsed_s.rows and not parsed_s.mapped.get("moq"):
@@ -715,6 +743,10 @@ async def run_create(
         "warehouse_sites": sorted(warehouse_codes),
         "has_sales": has_sales,
         "has_moq": bool(parsed_s.mapped.get("moq")),
+        "has_supply_source": has_supply,
+        # Snapshot the rule as it was applied: changing the setting later must
+        # not relabel a batch that was already computed.
+        "vendor_supply_sources": vendors if has_supply else [],
         # How each shared target was split, so the result page and the export
         # can show the basis without re-reading either file.
         "shared_targets": shared_targets,
@@ -775,6 +807,8 @@ def run_result(request: Request, run_id: str):
         today=today,
         days_to_start=days_to_start,
         keep_minutes=runstore.TTL_SECONDS // 60,
+        po_any=any(t["po_qty"] for t in totals.values()),
+        supply=_run_supply(params),
     )
 
 
@@ -820,6 +854,7 @@ def run_detail(
         available_scenarios=available,
         labels=_run_labels(run.params),
         gate=_run_gate(run.params),
+        supply=_run_supply(run.params),
         keep_minutes=runstore.TTL_SECONDS // 60,
     )
 
@@ -912,6 +947,20 @@ def _run_gate(params: dict) -> List[str]:
     return gate if isinstance(gate, list) else []
 
 
+def _run_supply(params: dict) -> dict:
+    """Supply-source rule as this batch applied it.
+
+    ``codes`` empty means the file carried no Supply source column and every
+    row was treated as 倉貨 — the page should then explain the fallback instead
+    of showing an empty rule.
+    """
+    codes = params.get("vendor_supply_sources")
+    return {
+        "codes": codes if isinstance(codes, list) else [],
+        "has_column": bool(params.get("has_supply_source")),
+    }
+
+
 def _totals(res) -> Dict[str, int]:
     """Per-scenario sums the result page shows, straight off the live result.
 
@@ -922,7 +971,7 @@ def _totals(res) -> Dict[str, int]:
         "target_qty", "dispatch_target", "total_stock", "total_pending",
         "warehouse_qty", "warehouse_pending", "total_dispatch", "need_qty",
         "short_qty", "blocked_qty", "expected_sales", "gap_target",
-        "shortfall_qty", "surplus_qty",
+        "shortfall_qty", "surplus_qty", "po_qty", "sto_qty",
     )
     if res is None:
         out = {k: 0 for k in keys}
@@ -962,14 +1011,18 @@ def _by_shop(lines, only_need: bool) -> List[dict]:
                 "alloc": 0,
                 "stock": 0,
                 "dispatch": 0,
+                "po": 0,
                 "surplus": 0,
                 "n_sku": 0,
+                "vendor": False,
             },
         )
         row["alloc"] += ln.alloc_qty
         row["stock"] += ln.stock_qty
         row["dispatch"] += ln.dispatch_qty
+        row["po"] += ln.po_qty
         row["surplus"] += ln.surplus_qty
+        row["vendor"] = row["vendor"] or ln.vendor
         if ln.dispatch_qty > 0:
             row["n_sku"] += 1
 

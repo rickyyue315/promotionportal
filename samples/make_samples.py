@@ -28,6 +28,10 @@ SKUS = [
     ("112009010012", "身體乳 250ml", 1500, 12),
 ]
 
+# A couple of shops are supplied by the vendor (行貨) rather than D001, so the
+# sample exercises the PO route as well as the STO one.
+VENDOR_SHOPS = {"HK05": "1", "MO02": "4"}
+
 HEAD = Font(bold=True)
 FILL = PatternFill("solid", fgColor="EDF1F5")
 
@@ -153,6 +157,7 @@ def stock_sap() -> Path:
             "Region",
             "Article",
             "Shop ABC indicator",
+            "Supply source",
             "Site",
             "SaSa Net Stock",
             "Safety Stock",
@@ -177,6 +182,7 @@ def stock_sap() -> Path:
                 "HK",
                 sku,
                 "",
+                "2",
                 "D001",
                 40 if sku == starved else int(qty * 0.75),
                 int(qty * 0.1),
@@ -200,6 +206,7 @@ def stock_sap() -> Path:
                     "MO" if shop.startswith("MO") else "HK",
                     sku,
                     "",
+                    VENDOR_SHOPS.get(shop, "2"),
                     shop,
                     on_hand,
                     int(qty / 20 * 0.15),

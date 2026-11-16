@@ -6,7 +6,7 @@
   <div>
     <h1>餐別與規則</h1>
     <div class="desc">
-      為 A／B／C 加上業務名稱，說明每個餐單代表甚麼；同時設定貨倉代碼與需要看 RP Type 的店舖。
+      為 A／B／C 加上業務名稱，說明每個餐單代表甚麼；同時設定貨倉代碼、Supply Source 貨源與需要看 RP Type 的店舖。
     </div>
   </div>
 </div>
@@ -74,6 +74,36 @@
       <p class="dim" style="font-size:12.5px;margin:0">
         只計 <span class="mono">SaSa Net Stock</span>；<span class="mono">Pending Received</span>
         是入倉中的貨，未到倉之前不能派，所以不計入上限。
+      </p>
+    </div>
+  </section>
+
+  <section class="card">
+    <header><h2>Supply Source 貨源規則</h2><span class="hint">行貨／倉貨</span></header>
+    <div class="body">
+      <label class="field" style="max-width:420px">
+        <span>屬於「行貨」的 Supply Source 代碼</span>
+        <input class="input" type="text" name="vendor_supply_sources" value="{{ supply_raw }}"
+               placeholder="1,4">
+      </label>
+      <p class="dim" style="font-size:12.5px;margin:0 0 12px">
+        多個代碼用逗號分隔，預設 <span class="mono">1,4</span>。
+        其餘代碼（包括 <span class="mono">2</span>、空白或未識別）一律當作倉貨。
+      </p>
+
+      <div class="alert info" style="margin-bottom:14px">
+        <span class="tag">規則</span>
+        <span>
+          <strong>行貨（1／4）</strong>：貨不經 D001，需求全數列為「需開 PO」，
+          要由 <strong>Buyer 開 PO</strong> 為店舖落單；不佔貨倉配額，亦不計入「倉存缺貨」。<br>
+          <strong>倉貨（2）</strong>：由 <strong>RP 開 STO</strong> 從 D001 取貨，受倉存上限限制。<br>
+          D001 自己的 Supply Source 一律忽略。
+        </span>
+      </div>
+
+      <p class="dim" style="font-size:12.5px;margin:0">
+        Supply Source 由庫存檔提供（SAP 明細的 <span class="mono">Supply source</span> 欄）。
+        庫存檔沒有這一欄時，全部店舖當作倉貨，結果頁會提示。
       </p>
     </div>
   </section>

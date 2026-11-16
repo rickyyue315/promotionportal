@@ -66,6 +66,7 @@
           <thead>
             <tr>
               <th>店舖</th>
+              {% if supply.has_column %}<th>貨源</th>{% endif %}
               {% if gate %}<th>RP Type</th>{% endif %}
               <th class="num">佔比</th>
               <th class="num">分配數量</th>
@@ -83,6 +84,15 @@
           {% for ln in lines %}
             <tr class="{{ 'is-short' if ln.dispatch_qty > 0 }}">
               <td class="mono strong">{{ ln.shop_code }}</td>
+              {% if supply.has_column %}
+              <td>
+                {% if ln.vendor %}
+                <span class="badge warn" title="Supply Source {{ ln.supply_source }}：行貨，由 Buyer 開 PO">{{ ln.supply_source }} 行貨</span>
+                {% else %}
+                <span class="badge neutral" title="Supply Source {{ ln.supply_source or '未提供' }}：倉貨，由 D001 開 STO">{{ ln.supply_source or '—' }} 倉貨</span>
+                {% endif %}
+              </td>
+              {% endif %}
               {% if gate %}
               <td>
                 {% if ln.rp_type %}
@@ -97,7 +107,10 @@
               <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
               <td class="num">{{ ln.need_qty | num }}</td>
               <td class="num">
-                {% if ln.dispatch_qty %}<span class="badge danger">{{ ln.dispatch_qty | num }}</span>
+                {% if ln.dispatch_qty %}
+                  {% if ln.vendor %}
+                  <span class="badge warn" title="行貨：由 Buyer 開 PO，不經 D001">{{ ln.po_qty | num }} PO</span>
+                  {% else %}<span class="badge danger">{{ ln.dispatch_qty | num }}</span>{% endif %}
                 {% else %}<span class="dim">—</span>{% endif %}
               </td>
               <td class="num">
@@ -114,6 +127,7 @@
           <tfoot>
             <tr style="background:var(--surface-2);font-weight:600">
               <td>合計</td>
+              {% if supply.has_column %}<td></td>{% endif %}
               {% if gate %}<td></td>{% endif %}
               <td class="num">{{ '%.2f%%' % (lines | sum(attribute='share_pct') * 100) }}</td>
               <td class="num">{{ lines | sum(attribute='alloc_qty') | num }}</td>
@@ -130,15 +144,24 @@
         </table>
       </div>
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
-        「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；「可派」受 D001 倉存限制，不足時按需求比例分配。
+        「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；
+        「可派」受 D001 倉存限制，不足時按需求比例分配（只計倉貨店舖）。
         {% if selected.group %}
         <br>這個 SKU 屬共用 Target 貨組 <strong>{{ selected.group }}</strong>，上面的 Target 是它在組內分到的份額；
         每店需求會與組內其他 SKU 一併封頂，兩邊不會就同一批缺貨各派一次。
         所以「差距」大於 0 但「需求」是 0，代表那個缺口已由組內另一個包裝在該店的存貨抵銷。
         {% endif %}
         {% if gate %}{{ gate | join('、') }} 只有 RP Type = RF 才會派貨，ND 或未提供一律 0 件。{% endif %}
+        {% if supply.codes %}
+        <br>「貨源」取自庫存檔的 <span class="mono">Supply Source</span>：{{ supply.codes | join('／') }} 是行貨，
+        需求由 <strong>Buyer 開 PO</strong> 落單，不經 D001、不受倉存上限限制，所以「缺貨」不會計入這些店舖；
+        2（或其他代碼）是倉貨，由 RP 開 STO 從 D001 取貨。
+        {% elif not supply.has_column %}
+        <br>庫存檔沒有 <span class="mono">Supply Source</span> 欄位，全部店舖當作倉貨（由 D001 開 STO）。
+        {% endif %}
       </div>
     {% elif by_shop %}
+      {% set po_shop = by_shop | sum(attribute='po') %}
       <div class="table-wrap">
         <table class="tbl">
           <thead>
@@ -147,6 +170,7 @@
               <th class="num">分配數量合計</th>
               <th class="num">現有庫存合計</th>
               <th class="num">需派貨合計</th>
+              {% if po_shop %}<th class="num">其中開 PO</th>{% endif %}
               <th class="num">可調出合計</th>
               <th class="num">有派貨 SKU</th>
             </tr>
@@ -158,6 +182,9 @@
               <td class="num">{{ r.alloc | num }}</td>
               <td class="num">{{ r.stock | num }}</td>
               <td class="num">{% if r.dispatch %}<span class="badge danger">{{ r.dispatch | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+              {% if po_shop %}
+              <td class="num">{% if r.po %}<span class="badge warn">{{ r.po | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
+              {% endif %}
               <td class="num">{{ r.surplus | num }}</td>
               <td class="num dim">{{ r.n_sku }}</td>
             </tr>
@@ -165,6 +192,11 @@
           </tbody>
         </table>
       </div>
+      {% if po_shop %}
+      <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+        「其中開 PO」是行貨店舖的部分：要由 Buyer 開 PO 落單，不由 D001 出貨。
+      </div>
+      {% endif %}
     {% else %}
       <div class="empty">
         <div class="big">沒有符合條件的資料</div>

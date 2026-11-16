@@ -70,6 +70,12 @@
     <div class="label">倉存缺貨</div>
     <div class="value">{{ totals[best_dispatch].short_qty | num }}<small>件 · 需求減可派</small></div>
   </div>
+  {% if po_any %}
+  <div class="kpi">
+    <div class="label">需開 PO（行貨）</div>
+    <div class="value">{{ totals[best_dispatch].po_qty | num }}<small>件 · Buyer 落單</small></div>
+  </div>
+  {% endif %}
   {% endif %}
 </div>
 
@@ -104,6 +110,16 @@
         <span class="dim">需求 ／ 實際可派</span>
         <span class="num strong">{{ t.need_qty | num }} ／ {{ t.total_dispatch | num }}</span>
       </div>
+      {% if t.po_qty %}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">　↳ 行貨：Buyer 開 PO</span>
+        <span class="num"><span class="badge warn">{{ t.po_qty | num }} 件</span></span>
+      </div>
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim">　↳ 倉貨：D001 開 STO</span>
+        <span class="num">{{ t.sto_qty | num }} 件</span>
+      </div>
+      {% endif %}
       {% if t.blocked_qty %}
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
         <span class="dim">RP Type 不派</span>
@@ -192,12 +208,13 @@
             <th class="num" rowspan="2">倉存</th>
             <th class="num" rowspan="2">夠貨</th>
             {% for sc in scenarios if totals[sc].n_sku %}
-            <th class="num" colspan="2" style="text-align:center;border-left:1px solid var(--border)">{{ scname(sc, labels) }}</th>
+            <th class="num" colspan="{{ 3 if po_any else 2 }}" style="text-align:center;border-left:1px solid var(--border)">{{ scname(sc, labels) }}</th>
             {% endfor %}
           </tr>
           <tr>
             {% for sc in scenarios if totals[sc].n_sku %}
             <th class="num" style="border-left:1px solid var(--border)">派貨</th>
+            {% if po_any %}<th class="num">開 PO</th>{% endif %}
             <th class="num">缺貨</th>
             {% endfor %}
           </tr>
@@ -229,6 +246,12 @@
             {% for sc in scenarios if totals[sc].n_sku %}
               {% set s = row.scenarios.get(sc) %}
               <td class="num" style="border-left:1px solid #f0f0ec">{{ s.total_dispatch | num if s else '—' }}</td>
+              {% if po_any %}
+              <td class="num">
+                {% if s and s.po_qty %}<span class="badge warn">{{ s.po_qty | num }}</span>
+                {% else %}<span class="dim">—</span>{% endif %}
+              </td>
+              {% endif %}
               <td class="num">
                 {% if s and s.short_qty %}
                   <span class="badge danger">{{ s.short_qty | num }}</span>
@@ -250,6 +273,12 @@
     {% endif %}
     {% if gate %}
     <br>RP Type 規則：{{ gate | join('、') }} 只有 RP Type = RF 才派貨，ND 或未提供一律 0 件，因此實際派貨量會較低。
+    {% endif %}
+    {% if supply.codes %}
+    <br>Supply Source {{ supply.codes | join('／') }} 屬行貨：要由 <strong>Buyer 開 PO</strong> 為店舖落單，
+    不由 D001 出貨，所以不佔倉存、不計入「缺貨」；Supply Source 2（或其他代碼）屬倉貨，由 RP 開 STO 從 D001 取貨。
+    {% elif not supply.has_column %}
+    <br>庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）。
     {% endif %}
   </div>
 </section>

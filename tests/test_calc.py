@@ -11,6 +11,8 @@ from app.calc import (
     PromoWindow,
     ShopSales,
     SkuTarget,
+    SUPPLY_VENDOR,
+    SUPPLY_WAREHOUSE,
     apportion,
     cap_to_available,
     compare_scenarios,
@@ -23,6 +25,8 @@ from app.calc import (
     sales_window_start,
     sku_moq,
     split_shared_targets,
+    supply_code,
+    supply_mode,
 )
 
 
@@ -687,3 +691,101 @@ class TestSharedTarget:
         dispatched = sum(line.dispatch_qty for line in res.lines)
         assert dispatched % 6 == 0
         assert dispatched >= 500
+
+
+class TestSupplySource:
+    """1／4 行貨 is a PO for the buyer; 2 倉貨 is an STO from D001."""
+
+    def test_codes_are_normalised(self):
+        for raw in (2, 2.0, "2", " 2 ", "2.0"):
+            assert supply_code(raw) == "2"
+        assert supply_code(None) == ""
+        assert supply_code(True) == ""
+
+    def test_vendor_codes_are_one_and_four(self):
+        assert supply_mode("1") == SUPPLY_VENDOR
+        assert supply_mode("4") == SUPPLY_VENDOR
+        assert supply_mode("2") == SUPPLY_WAREHOUSE
+        assert supply_mode("") == SUPPLY_WAREHOUSE          # no column / blank
+        assert supply_mode("9") == SUPPLY_WAREHOUSE         # unrecognised
+
+    def test_vendor_route_is_configurable(self):
+        assert supply_mode("3", ["3"]) == SUPPLY_VENDOR
+        assert supply_mode("1", ["3"]) == SUPPLY_WAREHOUSE
+
+    def test_vendor_shop_is_not_capped_by_the_warehouse(self):
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            [SkuTarget("K", 200)],
+            {},
+            warehouse_by_sku={"K": 50},
+            supply_by_sku={"K": {"S1": "1", "S2": "2"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["S1"].vendor
+        assert by_shop["S1"].po_qty == 100     # full need, no D001 ceiling
+        assert by_shop["S1"].sto_qty == 0
+        assert by_shop["S2"].po_qty == 0
+        assert by_shop["S2"].dispatch_qty == 50  # warehouse still caps this one
+
+        sku = res.skus[0]
+        assert sku.po_qty == 100
+        assert sku.sto_qty == 50
+        assert sku.total_dispatch == 150
+        assert sku.short_qty == 50              # only the warehouse route is short
+
+    def test_vendor_units_do_not_eat_the_warehouse_quota(self):
+        # Without the split, S2 would have received only part of its 60 because
+        # the vendor shop was competing for the same 60 units.
+        res = compute_scenario(
+            "A",
+            ["PO1", "WH1"],
+            [0.5, 0.5],
+            [SkuTarget("K", 120)],
+            {},
+            warehouse_by_sku={"K": 60},
+            supply_by_sku={"K": {"PO1": "4", "WH1": "2"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["PO1"].po_qty == 60
+        assert by_shop["WH1"].dispatch_qty == 60
+        assert res.skus[0].short_qty == 0
+        assert any("行貨" in w and "開 PO" in w for w in res.warnings)
+
+    def test_blank_supply_source_keeps_the_old_behaviour(self):
+        kwargs = dict(warehouse_by_sku={"K": 120})
+        plain = compute_scenario(
+            "A", ["S1", "S2"], [0.5, 0.5], [SkuTarget("K", 200)], {}, **kwargs
+        )
+        blank = compute_scenario(
+            "A", ["S1", "S2"], [0.5, 0.5], [SkuTarget("K", 200)], {},
+            supply_by_sku={"K": {"S1": "", "S2": ""}}, **kwargs
+        )
+        assert [l.dispatch_qty for l in plain.lines] == [l.dispatch_qty for l in blank.lines]
+        assert blank.skus[0].po_qty == 0
+
+    def test_unrecognised_code_is_reported(self):
+        res = compute_scenario(
+            "A", ["S1"], [1.0], [SkuTarget("K", 50)], {},
+            supply_by_sku={"K": {"S1": "7"}},
+        )
+        assert any("未設定的代碼" in w for w in res.warnings)
+        assert res.skus[0].po_qty == 0
+
+    def test_group_summary_carries_the_po_quantity(self):
+        # Two members of one group: P1 from the warehouse, P2 on a PO. The
+        # comparison row is the group, so its 開 PO figure is the group's.
+        targets = [
+            SkuTarget("P1", 100, group="P1"),
+            SkuTarget("P2", 100, group="P1"),
+        ]
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets,
+            {"P1": {"S1": 0}, "P2": {"S1": 0}},
+            supply_by_sku={"P1": {"S1": "2"}, "P2": {"S1": "1"}},
+        )
+        row = compare_scenarios({"A": res})[0]
+        assert row["scenarios"]["A"].po_qty == 100
+        assert row["scenarios"]["A"].total_dispatch == 200

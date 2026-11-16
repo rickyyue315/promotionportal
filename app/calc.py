@@ -42,6 +42,25 @@ The gate is applied *after* the normal dispatch is computed, so the report can
 still show how much *would* have been sent and why it was stopped, instead of
 silently reporting a zero.
 
+Supply source
+-------------
+Each SKU × shop row of the SAP stock file carries a ``Supply source`` code,
+which says who actually supplies that shop:
+
+    1 / 4  vendor    — 行貨, the buyer raises a PO; D001 is not involved
+    2      warehouse — 倉貨, RP issues an STO from D001
+
+The distinction is not cosmetic: goods ordered by PO never leave the warehouse,
+so a vendor shop's need must not consume D001's stock nor be reported as a
+warehouse shortage. Only warehouse-sourced needs are capped by D001 and only
+they can be short of it. Vendor needs are reported as ``po_qty`` — a worklist
+for the buyer — while ``total_dispatch`` still counts everything the shop
+receives, whichever route it takes.
+
+A stock file with no Supply source column — or a blank cell, or a code we do
+not recognise — is treated as warehouse, i.e. exactly the behaviour before this
+rule existed; the run warns when that fallback is used.
+
 Days of cover
 -------------
 A promotion can run for weeks, but shops are only sent the first few days of
@@ -90,14 +109,19 @@ each look short in a shop would both receive stock for the same missing units.
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
-from typing import Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 COVERAGE_SUFFICIENT = "sufficient"  # total shop stock covers the target
 COVERAGE_SHORT = "short"  # not enough goods anywhere
 
 RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
+
+SUPPLY_WAREHOUSE = "warehouse"  # 倉貨: D001 -> shop, RP raises an STO
+SUPPLY_VENDOR = "vendor"  # 行貨: vendor -> shop, buyer raises a PO
+DEFAULT_VENDOR_SOURCES = ("1", "4")  # Supply source codes meaning 行貨
 
 
 @dataclass(frozen=True)
@@ -169,11 +193,24 @@ class Line:
     expected_sales: int = 0
     need_qty: int = 0
     short_qty: int = 0
+    supply_source: str = ""
+    supply_mode: str = SUPPLY_WAREHOUSE
+    po_qty: int = 0
 
     @property
     def on_hand(self) -> int:
         """Real stock plus what is already on its way to the shop."""
         return self.stock_qty + self.pending_qty
+
+    @property
+    def vendor(self) -> bool:
+        """行貨: supplied by the vendor on a PO, not from the warehouse."""
+        return self.supply_mode == SUPPLY_VENDOR
+
+    @property
+    def sto_qty(self) -> int:
+        """The part of the dispatch that leaves D001 on an STO."""
+        return max(self.dispatch_qty - self.po_qty, 0)
 
 
 @dataclass(frozen=True)
@@ -201,10 +238,16 @@ class SkuSummary:
     blocked_qty: int = 0
     gap_supply: int = 0
     group: str = ""
+    po_qty: int = 0
 
     @property
     def enough(self) -> bool:
         return self.coverage_status == COVERAGE_SUFFICIENT
+
+    @property
+    def sto_qty(self) -> int:
+        """Dispatch that leaves the warehouse, i.e. everything not on a PO."""
+        return max(self.total_dispatch - self.po_qty, 0)
 
     @property
     def is_group_lead(self) -> bool:
@@ -338,6 +381,40 @@ def sku_moq(moq_by_sku: Optional[Dict[str, int]], sku: str) -> int:
     except (TypeError, ValueError):
         return 1
     return max(value, 1)
+
+
+def supply_code(value: Any) -> str:
+    """'Supply source' as a comparable string.
+
+    SAP hands the code over as text, as ``2``, or as ``2.0`` depending on how
+    the cell was formatted, so all three must land on the same value — otherwise
+    a whole shop silently changes route because of a cell format.
+    """
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, (int, float)):
+        number = float(value)
+        return str(int(number)) if number.is_integer() else str(number)
+    text = str(value).strip()
+    # A text cell holding "2.0" is the same code as 2; anything else is left
+    # exactly as typed, so a leading zero can never be lost.
+    match = re.fullmatch(r"(\d+)\.0+", text)
+    return match.group(1) if match else text
+
+
+def supply_mode(
+    code: str, vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES
+) -> str:
+    """Which route a shop takes for this SKU: vendor (PO) or warehouse (STO).
+
+    Only the codes configured as 行貨 (1 and 4 by default) mean vendor. ``2``
+    is 倉貨, and so is anything blank or unrecognised — that is what the app did
+    before Supply source existed, and it keeps a file without the column
+    behaving exactly as before. The caller warns when the fallback is used, so
+    the assumption never stays silent.
+    """
+    vendors = {str(v).strip().upper() for v in vendor_sources if str(v).strip()}
+    return SUPPLY_VENDOR if supply_code(code).upper() in vendors else SUPPLY_WAREHOUSE
 
 
 # ---------------------------------------------------------------------------
@@ -617,6 +694,8 @@ def compute_scenario(
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
     moq_by_sku: Optional[Dict[str, int]] = None,
+    supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
+    vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
 ) -> ScenarioResult:
     """Compute allocations and dispatch for one share set.
 
@@ -629,6 +708,8 @@ def compute_scenario(
     ``warehouse_by_sku`` is the warehouse net stock that actually limits how much
     can be sent. ``moq_by_sku`` comes from the stock file (SKU × shop): it is
     what rounds each shop's need up, and the target file has no say in it.
+    ``supply_by_sku`` maps SKU -> shop -> ``Supply source`` code; only
+    ``vendor_sources`` codes are supplied by PO instead of from D001.
     """
     warn = list(warnings or [])
     lines: List[Line] = []
@@ -640,6 +721,8 @@ def compute_scenario(
     sales_map = sales_by_sku or {}
     warehouse = warehouse_by_sku or {}
     warehouse_pending = warehouse_pending_by_sku or {}
+    supply_map = supply_by_sku or {}
+    vendors = {str(v).strip().upper() for v in vendor_sources if str(v).strip()}
     sales_known = sales_by_sku is not None and as_of is not None
     promo_days = promo.days if promo else 0
 
@@ -648,6 +731,9 @@ def compute_scenario(
     short_skus: set = set()
     short_units = 0
     missing_warehouse: List[str] = []
+    vendor_shops: set = set()
+    po_units = 0
+    odd_sources: set = set()
 
     known = set(shops)
     unknown_stock = sorted(
@@ -686,9 +772,8 @@ def compute_scenario(
             if warehouse_by_sku is not None and target.sku in warehouse
             else None
         )
-        if warehouse_by_sku is not None and available is None:
-            missing_warehouse.append(target.sku)
 
+        per_shop_supply = supply_map.get(target.sku, {})
         rows: List[dict] = []
         for shop, share, alloc in zip(shops, shares, allocs):
             stock = int(round(float(per_shop_stock.get(shop, 0) or 0)))
@@ -706,6 +791,13 @@ def compute_scenario(
             gated = bool(gate) and shop.upper() in gate and rp_type != RP_DISPATCHABLE
             blocked = gated and need > 0
 
+            code = supply_code(per_shop_supply.get(shop, ""))
+            mode = supply_mode(code, vendors)
+            if mode == SUPPLY_VENDOR:
+                vendor_shops.add(shop)
+            elif code and code.upper() != "2" and code.upper() not in vendors:
+                odd_sources.add(code)
+
             rows.append(
                 {
                     "shop": shop,
@@ -720,8 +812,19 @@ def compute_scenario(
                     "rp_type": rp_type,
                     "blocked": blocked,
                     "surplus": max(stock - alloc, 0),
+                    "supply_source": code,
+                    "vendor": mode == SUPPLY_VENDOR,
                 }
             )
+
+        # A SKU carried only by vendor shops never draws on the warehouse, so a
+        # missing D001 row is not worth reporting for it.
+        if (
+            warehouse_by_sku is not None
+            and available is None
+            and any(r["need"] > 0 and not r["vendor"] for r in rows)
+        ):
+            missing_warehouse.append(target.sku)
 
         prepared.append(
             {
@@ -748,13 +851,20 @@ def compute_scenario(
         available = item["available"]
         candidates = item["candidates"]
 
-        if available is not None and sum(candidates) > available:
-            capped = cap_to_available(candidates, available, moq)
+        # Only warehouse-sourced shops draw on D001. A vendor shop's need is
+        # filled by a PO, so letting it compete for the warehouse would starve
+        # the shops that can only be served from there.
+        from_warehouse = [0 if row["vendor"] else qty for row, qty in zip(rows, candidates)]
+        if available is not None and sum(from_warehouse) > available:
+            capped_wh = cap_to_available(from_warehouse, available, moq)
         else:
-            capped = candidates
+            capped_wh = from_warehouse
         # A group cap hands out single units rather than MOQ steps, so what is
         # left gets rounded once here. For a standalone SKU this is a no-op.
-        capped = [round_up_to(qty, moq) for qty in capped]
+        capped = [
+            round_up_to(qty if row["vendor"] else wh, moq)
+            for row, qty, wh in zip(rows, candidates, capped_wh)
+        ]
 
         total_stock = 0
         total_pending = 0
@@ -763,6 +873,8 @@ def compute_scenario(
         total_blocked = 0
         total_expected = 0
         total_rate = 0.0
+        total_po = 0
+        total_short = 0
         surplus = 0
         needing = 0
 
@@ -784,6 +896,8 @@ def compute_scenario(
             ):
                 continue
 
+            po = dispatch if row["vendor"] else 0
+
             total_stock += row["stock"]
             total_pending += row["pending"]
             total_dispatch += dispatch
@@ -802,12 +916,18 @@ def compute_scenario(
                 short = 0
             else:
                 total_need += row["need"]
+                # 行貨 is ordered on a PO rather than pulled from D001, so its
+                # units are a buyer worklist, not warehouse stock in demand.
+                if row["vendor"]:
+                    total_po += po
+                    po_units += po
                 # Rounding a capped quantity up to the MOQ can land a few units
                 # above the need; that is an over-send, never a shortage.
                 short = max(row["need"] - dispatch, 0)
                 if short > 0:
                     short_skus.add(target.sku)
                     short_units += short
+                total_short += short
 
             lines.append(
                 Line(
@@ -827,6 +947,11 @@ def compute_scenario(
                     expected_sales=row["expected"],
                     need_qty=row["need"],
                     short_qty=short,
+                    supply_source=row["supply_source"],
+                    supply_mode=(
+                        SUPPLY_VENDOR if row["vendor"] else SUPPLY_WAREHOUSE
+                    ),
+                    po_qty=po,
                 )
             )
 
@@ -858,10 +983,11 @@ def compute_scenario(
                     target.target_qty - total_expected if sales_known else 0
                 ),
                 need_qty=total_need,
-                short_qty=max(total_need - total_dispatch, 0),
+                short_qty=total_short,
                 blocked_qty=total_blocked,
                 gap_supply=target.target_qty - (total_stock + total_pending + total_dispatch),
                 group=target.group,
+                po_qty=total_po,
             )
         )
 
@@ -876,6 +1002,22 @@ def compute_scenario(
             + f" 依 RP Type 規則不派貨：{len(blocked_skus)} 個 SKU，共少派 "
             + f"{blocked_units:,} 件（只有 RP Type = {RP_DISPATCHABLE} 才派，"
             + "ND 或未提供一律 0 件）"
+        )
+    if po_units:
+        warn.append(
+            "Supply Source "
+            + "／".join(sorted(vendors))
+            + f" 屬行貨：{len(vendor_shops)} 間店舖共 {po_units:,} 件需由 Buyer 開 PO 落單，"
+            + "已不佔 D001 倉存、不計入倉存缺貨（"
+            + "、".join(sorted(vendor_shops)[:6])
+            + ("…" if len(vendor_shops) > 6 else "")
+            + "）"
+        )
+    if odd_sources:
+        warn.append(
+            "Supply Source 出現未設定的代碼（"
+            + "、".join(sorted(odd_sources))
+            + "），已當作倉貨（由 D001 出 STO）處理"
         )
     if short_units:
         warn.append(
@@ -910,6 +1052,8 @@ def compute_all_scenarios(
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
     moq_by_sku: Optional[Dict[str, int]] = None,
+    supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
+    vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
 ) -> Dict[str, ScenarioResult]:
     """Compute every scenario from {scenario: {shop: pct}}."""
     out: Dict[str, ScenarioResult] = {}
@@ -931,6 +1075,8 @@ def compute_all_scenarios(
             warehouse_by_sku=warehouse_by_sku,
             warehouse_pending_by_sku=warehouse_pending_by_sku,
             moq_by_sku=moq_by_sku,
+            supply_by_sku=supply_by_sku,
+            vendor_sources=vendor_sources,
         )
     return out
 
@@ -939,7 +1085,7 @@ _GROUP_SUM_FIELDS = (
     "target_qty", "total_alloc", "total_stock", "total_dispatch", "surplus_qty",
     "shortfall_qty", "n_shops_needing", "dispatch_target", "total_pending",
     "warehouse_qty", "warehouse_pending", "expected_sales", "gap_target",
-    "need_qty", "short_qty", "blocked_qty", "gap_supply",
+    "need_qty", "short_qty", "blocked_qty", "gap_supply", "po_qty",
 )
 
 

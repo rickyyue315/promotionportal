@@ -94,8 +94,8 @@
           </label>
           <p class="dim" style="font-size:12.5px;margin:0">
             寬表（第一欄 SKU，每欄一店）或長表（SKU／店舖／數量）都可以；
-            SAP 明細（Article／Site／SaSa Net Stock／RP Type／MOQ）可直接上載，
-            MOQ 這一欄就是派貨進位用的。
+            SAP 明細（Article／Site／SaSa Net Stock／RP Type／MOQ／Supply source）可直接上載，
+            MOQ 用來進位，Supply source 決定行貨開 PO 還是倉貨開 STO（D001 忽略）。
             <a href="/run/template/stock">下載範本</a>
           </p>
         </div>
@@ -151,7 +151,8 @@
       {% if rp_gate_shops %}
       <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
       {% endif %}
-      <p style="margin:0 0 10px"><strong>4. 倉存上限</strong>　D001 只計 SaSa Net Stock；需求超過倉存時按比例分配，差額就是缺貨。</p>
+      <p style="margin:0 0 10px"><strong>3c. 貨源</strong>　Supply Source 1／4 是行貨：需求列為「需開 PO」，由 Buyer 落單，不佔 D001；2 是倉貨，由 RP 開 STO。</p>
+      <p style="margin:0 0 10px"><strong>4. 倉存上限</strong>　D001 只計 SaSa Net Stock；只有倉貨店舖的需求會撞上限，超過時按比例分配，差額就是缺貨。</p>
       <p style="margin:0"><strong>5. 銷售差距</strong>　日銷 =（上月銷量＋本月銷量）÷ 有紀錄日數（新產品由 Launch Date 起計）；用日銷 × 推廣日數與 Target、及與「庫存＋派貨」比較。</p>
     </div>
   </section>

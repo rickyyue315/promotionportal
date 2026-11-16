@@ -59,6 +59,12 @@ DEFAULT_RP_GATE = "HB87"
 WAREHOUSE_KEY = "warehouse_sites"
 DEFAULT_WAREHOUSE = "D001"
 
+# Supply source codes meaning 行貨: the shop is supplied by the vendor, so the
+# buyer raises a PO and D001 is not involved. Everything else — 2 倉貨, blank,
+# unknown — is supplied from the warehouse on an STO.
+SUPPLY_KEY = "vendor_supply_sources"
+DEFAULT_SUPPLY = "1,4"
+
 DEFAULT_SCENARIO_SETTINGS: Dict[str, Dict[str, Any]] = {
     "A": {"label": "恆常推廣", "remark": "", "optional": 0},
     "B": {"label": "精彩價&PIP", "remark": "", "optional": 0},
@@ -217,6 +223,10 @@ def _seed_settings(conn: sqlite3.Connection) -> None:
     conn.execute(
         "INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
         (WAREHOUSE_KEY, DEFAULT_WAREHOUSE),
+    )
+    conn.execute(
+        "INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
+        (SUPPLY_KEY, DEFAULT_SUPPLY),
     )
 
 
@@ -378,6 +388,11 @@ def rp_gate_shops() -> List[str]:
 def warehouse_sites() -> List[str]:
     """Site codes that are warehouses, not shops (stock reported separately)."""
     return _code_list(WAREHOUSE_KEY, DEFAULT_WAREHOUSE)
+
+
+def vendor_supply_sources() -> List[str]:
+    """Supply source codes that mean 行貨 (buyer opens a PO, no STO)."""
+    return _code_list(SUPPLY_KEY, DEFAULT_SUPPLY)
 
 
 def _code_list(key: str, default: str) -> List[str]:
