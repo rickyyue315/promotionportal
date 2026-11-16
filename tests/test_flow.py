@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db
+from app import db, version
 from app.main import app
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
@@ -39,6 +39,21 @@ def login(client: TestClient, password: str, name: str = "tester") -> None:
 
 def test_health_no_auth(client):
     assert client.get("/health").json()["ok"] is True
+
+
+def test_health_reports_version(client):
+    body = client.get("/health").json()
+    assert body["version"] == version.APP_VERSION
+    assert body["released_at"] == version.RELEASED_AT
+    assert body["started_at"]
+
+
+def test_version_shown_on_login_page():
+    # A fresh client, so the shared module cookie cannot bounce us to the app.
+    with TestClient(app) as fresh:
+        html = fresh.get("/login").text
+    assert version.label() in html
+    assert f"v{version.APP_VERSION}" in html
 
 
 def test_root_redirects_to_login(client):

@@ -51,6 +51,49 @@ uvicorn app.main:app --reload --port 8000
 
 ---
 
+## 版本號
+
+側欄左下角、登入頁底部、`/health` 顯示同一組版本資訊：
+
+```
+v1.1.0 · a8636a9
+```
+
+| 部分 | 意思 | 從哪來 |
+|------|------|--------|
+| `1.1.0` | 功能版本 | `app/version.py` 的 `APP_VERSION`，發布時人手遞增 |
+| `a8636a9` | 正在跑的程式碼 commit | Railway 的 `RAILWAY_GIT_COMMIT_SHA`；本機讀 `.git` |
+| 啟動時間 | 這個進程何時啟動（容器部署約等於部署時間） | 載入時記下，只在 `/health` 與滑鼠懸停提示顯示 |
+
+**判斷是否已套用最新版本**：先比版號，再比 commit。版號相同、commit 不同，
+代表同一功能版本上還有後續小修；兩者都跟最新 commit 一致就是最新。
+**完全看不到這行字，就是舊版本** —— 版本號之前的部署沒有這個功能。
+
+部署後不用登入即可核對：
+
+```bash
+curl -s https://<你的網域>/health
+# {"ok":true,"time":"2026-11-16T11:58:03","version":"1.1.0",
+#  "released_at":"2026-11-16","commit":"a8636a9","started_at":"2026-11-16 11:58"}
+```
+
+### 發布時要改的三件事
+
+1. `app/version.py`：`APP_VERSION` 遞增（加功能 → minor，只修 bug → patch），`RELEASED_AT` 改今日
+2. 下方版本紀錄加一行
+3. Commit
+
+### 版本紀錄
+
+| 版本 | 日期 | 內容 |
+|------|------|------|
+| 1.1.0 | 2026-11-16 | MOQ 改由店舖庫存檔讀取；介面與 `/health` 顯示版本號 |
+| 1.0.0 | 2026-11-12 | 初版：A／B／C 佔比拆分、派貨與夠貨判斷、Excel 匯出 |
+
+逐筆改動看 `git log --oneline`。
+
+---
+
 ## Railway 部署
 
 ### 1. 建 Volume（先做，順序很重要）
@@ -86,7 +129,9 @@ python -c "import secrets; print(secrets.token_urlsafe(48))"
 3. Railway 會讀 `railway.json` 與 `Procfile`，自動用 uvicorn 啟動
 4. **Settings → Networking → Generate Domain**
 
-健康檢查路徑是 `/health`，回 `{"ok":true}` 即正常。
+健康檢查路徑是 `/health`，回 `{"ok":true}` 即正常；同一個回應也帶 `version` 與
+`commit`，部署後重新載入任何一頁，側欄左下角的版本號有變就是新版本已生效
+（見上方「版本號」）。
 
 ### 資源
 
@@ -309,6 +354,7 @@ promo-portal/
 │   ├── db.py            SQLite schema 與查詢
 │   ├── auth.py          簽名 cookie，admin / user 兩種角色
 │   ├── excel_io.py      Excel 解析與匯出（含格式自動辨識）
+│   ├── version.py       版本號、commit、啟動時間
 │   ├── main.py          FastAPI 路由
 │   ├── templates/       Jinja2 頁面
 │   └── static/app.css   樣式
@@ -323,10 +369,10 @@ promo-portal/
 python -m pytest tests/ -q
 ```
 
-89 個測試，約 4 秒。涵蓋分配演算法、MOQ 進位（來源為庫存檔）、夠貨邊界、
+91 個測試，約 5 秒。涵蓋分配演算法、MOQ 進位（來源為庫存檔）、夠貨邊界、
 推廣日數縮小 Target、派貨批次切分、日銷與 Launch Date、貨倉上限分配、
 完整上載到匯出流程、角色權限、重複 SKU 攔截、
-SAP 欄位辨識、HB87 的 RP Type 規則、餐別名稱快照。
+SAP 欄位辨識、HB87 的 RP Type 規則、餐別名稱快照、版本號顯示。
 
 ---
 

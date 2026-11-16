@@ -35,6 +35,7 @@
         <span>{{ '管理員' if is_admin else '用戶' }}</span>
         <a href="/logout">登出</a>
       </div>
+      <div class="ver" title="版本 {{ version.version }}　代碼 {{ version.commit or '未取得' }}　發布 {{ version.released_at }}　啟動 {{ version.started_at }}">{{ version_label }}</div>
     </div>
   </aside>
 

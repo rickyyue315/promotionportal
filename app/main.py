@@ -14,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, calc, db, excel_io
+from . import auth, calc, db, excel_io, version
 
 BASE = Path(__file__).resolve().parent
 
@@ -41,6 +41,10 @@ def scname(sc: str, labels: Optional[Dict[str, Any]] = None) -> str:
 
 
 templates.env.globals["scname"] = scname
+# Every page carries the build label, so "is the latest version live?" is
+# answered by looking at the screen instead of guessing from behaviour.
+templates.env.globals["version"] = version.as_dict()
+templates.env.globals["version_label"] = version.label()
 
 
 # ---------------------------------------------------------------------------
@@ -143,7 +147,9 @@ def logout():
 
 @app.get("/health")
 def health():
-    return {"ok": True, "time": db.now()}
+    # Unauthenticated on purpose: Railway's healthcheck and a quick deploy
+    # verification both need it, and it exposes nothing but build metadata.
+    return {"ok": True, "time": db.now(), **version.as_dict()}
 
 
 # ---------------------------------------------------------------------------
