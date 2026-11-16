@@ -105,8 +105,9 @@ def test_backup_is_a_working_database(admin_client, tmp_path):
             for r in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
         }
         # The backup has to carry the shares, not just the schema.
-        assert {"share_set", "share_entry", "shop", "run"} <= names
-        assert conn.execute("SELECT COUNT(*) FROM share_set").fetchone()[0] >= 0
+        assert {"share_set", "share_entry", "shop", "usage_log"} <= names
+        # And it must not resurrect the calculation tables this version drops.
+        assert not ({"run", "run_sku", "run_line", "upload", "sku_target"} & names)
     finally:
         conn.close()
 

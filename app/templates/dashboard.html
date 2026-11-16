@@ -29,7 +29,7 @@
 <div class="alert error">
   <span class="tag">重新部署會清空</span>
   <span>
-    佔比、批次與上載紀錄全部存在 <span class="mono">{{ storage.path }}</span>，
+    每月佔比與使用紀錄全部存在 <span class="mono">{{ storage.path }}</span>，
     但這個位置在容器本機，<strong>下次部署會由空白資料庫重新開始</strong>。
     請到 Railway 為此 service 掛一個 Volume（mount path <span class="mono">/data</span>），
     重新部署後這一條警告會消失，代表資料已改存到 volume。
@@ -48,11 +48,11 @@
     <div class="value">{{ n_ready }}<small>/ {{ required | length }} 個常設餐別</small></div>
   </div>
   <div class="kpi">
-    <div class="label">最近批次 SKU</div>
-    <div class="value">{{ latest.n_sku if latest else '—' }}</div>
+    <div class="label">本月計算次數</div>
+    <div class="value">{{ usage.n }}<small>次</small></div>
   </div>
   <div class="kpi {{ 'danger' if latest and latest.n_short }}">
-    <div class="label">最近批次不夠貨</div>
+    <div class="label">最近一次不夠貨</div>
     <div class="value">{{ latest.n_short if latest else '—' }}<small>個 SKU</small></div>
   </div>
 </div>
@@ -108,30 +108,37 @@
   </section>
 
   <section class="card">
-    <header><h2>最近批次</h2></header>
+    <header>
+      <h2>最近使用</h2>
+      <span class="hint">只記日期時間，不記計算內容</span>
+    </header>
     <div class="body flush">
-      {% if latest %}
+      {% if recent %}
       <table class="tbl">
         <tbody>
-          <tr><td class="dim">期間</td><td class="strong">{{ latest.period }}</td></tr>
-          <tr><td class="dim">計算時間</td><td>{{ latest.created_at | replace('T', ' ') }}</td></tr>
-          <tr><td class="dim">執行者</td><td>{{ latest.created_by or '—' }}</td></tr>
-          {% for sc in scenarios %}
-            {% if latest_totals and latest_totals[sc] and latest_totals[sc].n_sku %}
-            <tr>
-              <td class="dim">{{ scname(sc, latest_labels) }}</td>
-              <td>
-                需派 <span class="strong">{{ latest_totals[sc].total_dispatch | num }}</span> 件
-                <span class="dim">·</span>
-                不夠貨 <span class="strong" style="color:{{ '#b3392c' if latest_totals[sc].n_short else 'inherit' }}">{{ latest_totals[sc].n_short }}</span> 個 SKU
-              </td>
-            </tr>
-            {% endif %}
-          {% endfor %}
+          <tr><td class="dim">最近一次</td><td class="strong nowrap">{{ recent[0].at | replace('T', ' ') }}</td></tr>
+          <tr><td class="dim">期間 ／ 執行者</td><td>{{ recent[0].period }} ｜ {{ recent[0].user or '—' }}</td></tr>
+          <tr><td class="dim">餐別</td><td>{{ (recent[0].scenarios or '—') | replace(',', '、') }}</td></tr>
+          <tr><td class="dim">SKU 數 ／ 不夠貨</td>
+            <td>{{ recent[0].n_sku }} 個 ／
+              <span class="{{ 'badge danger' if recent[0].n_short else 'badge ok' }}">{{ recent[0].n_short }}</span>
+            </td>
+          </tr>
+          {% if recent | length > 1 %}
+          <tr>
+            <td class="dim">之前</td>
+            <td class="dim" style="font-size:12px">
+              {% for u in recent[1:] %}
+                {{ u.at | replace('T', ' ') }} · {{ u.period }} · {{ u.user or '—' }}{{ '　｜　' if not loop.last }}
+              {% endfor %}
+            </td>
+          </tr>
+          {% endif %}
         </tbody>
       </table>
-      <div class="body" style="border-top:1px solid var(--border)">
-        <a class="btn" href="/run/{{ latest.id }}">查看結果</a>
+      <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+        計算結果不會保存，只在計算後保留約 {{ keep_minutes }} 分鐘，需要留檔請即時按「匯出 Excel」。
+        <a href="/runs">全部使用紀錄</a>
       </div>
       {% else %}
       <div class="empty">
@@ -173,7 +180,7 @@
         <h3 style="margin-bottom:6px">4 · 比較三個情境後匯出</h3>
         <p class="dim" style="margin:0;font-size:13px">
           A／B／C 並排比較，看哪個假設下缺貨最少、派貨最省。
-          需要時匯出 Excel 交給店舖或倉庫執行。
+          結果只在畫面上保留約 {{ keep_minutes }} 分鐘，需要交店舖或倉庫就即時匯出 Excel。
         </p>
       </div>
     </div>

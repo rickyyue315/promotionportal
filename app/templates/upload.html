@@ -156,32 +156,6 @@
   </section>
 </div>
 
-{% if target_uploads or stock_uploads %}
-<section class="card">
-  <header><h2>最近上載的檔案</h2></header>
-  <div class="body flush">
-    <div class="table-wrap" style="max-height:320px">
-      <table class="tbl">
-        <thead>
-          <tr><th>類型</th><th>檔名</th><th class="num">筆數</th><th>上載時間</th><th>上載者</th></tr>
-        </thead>
-        <tbody>
-        {% for u in (target_uploads[:8] + stock_uploads[:8]) | sort(attribute='id', reverse=true) %}
-          <tr>
-            <td><span class="badge neutral">{{ 'Target' if u.kind == 'target' else '庫存' }}</span></td>
-            <td class="dim">{{ u.filename or '—' }}</td>
-            <td class="num">{{ u.n_rows | num }}</td>
-            <td class="dim nowrap">{{ u.uploaded_at | replace('T',' ') }}</td>
-            <td class="dim">{{ u.uploaded_by or '—' }}</td>
-          </tr>
-        {% endfor %}
-        </tbody>
-      </table>
-    </div>
-  </div>
-</section>
-{% endif %}
-
 <script>
 const startEl = document.getElementById('promoStart');
 const endEl = document.getElementById('promoEnd');

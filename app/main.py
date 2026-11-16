@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import io
 import os
 import tempfile
 from contextlib import asynccontextmanager
@@ -15,7 +14,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from . import auth, calc, db, excel_io, version
+from . import auth, calc, db, excel_io, runstore, version
 
 BASE = Path(__file__).resolve().parent
 
@@ -174,14 +173,8 @@ def dashboard(request: Request):
     auth.require_user(request)
     period = db.current_period()
     status = db.share_status(period)
-    runs = db.list_runs(limit=5)
-    latest = runs[0] if runs else None
-
-    latest_totals = None
-    if latest:
-        latest_totals = {
-            sc: db.run_totals(latest["id"], sc) for sc in db.SCENARIOS
-        }
+    latest = db.latest_usage()
+    usage = db.usage_summary(period)
 
     # Optional plans (C, usually) do not make the month look "not ready".
     required = [sc for sc in db.SCENARIOS if not status[sc]["optional"]]
@@ -191,10 +184,10 @@ def dashboard(request: Request):
         "dashboard.html",
         period=period,
         status=status,
-        runs=runs,
         latest=latest,
-        latest_totals=latest_totals,
-        latest_labels=_run_labels(_run_params(latest)) if latest else db.scenario_labels(),
+        usage=usage,
+        recent=db.list_usage(limit=5),
+        keep_minutes=runstore.TTL_SECONDS // 60,
         n_shops=len(db.active_shop_codes()),
         required=required,
         n_ready=sum(1 for sc in required if status[sc]["ready"]),
@@ -492,8 +485,6 @@ def run_new_page(request: Request, period: str = ""):
         promo_start=today.isoformat(),
         promo_end=(today + timedelta(days=13)).isoformat(),
         dispatch_days=4,
-        target_uploads=db.list_uploads("target"),
-        stock_uploads=db.list_uploads("stock"),
         periods=_period_options(period),
         can_admin=auth.is_admin(user),
     )
@@ -692,70 +683,49 @@ async def run_create(
                 f"（例：{target_only[0]}）"
             )
 
-    target_upload = db.create_upload(
-        "target",
-        period,
-        target_file.filename or "",
-        name,
-        len(parsed_t.rows),
-        {"mapped": parsed_t.mapped, "warnings": parsed_t.warnings},
-    )
-    db.add_targets(target_upload, parsed_t.rows)
+    # Nothing about the files or the numbers goes to disk. The finished result
+    # is handed to runstore (memory, a couple of hours) so the result page,
+    # the drill-downs and the export work; the database only learns that a
+    # calculation happened.
+    params = {
+        "scenarios": ready,
+        "share_totals": {sc: sum(shares[sc].values()) for sc in ready},
+        "warnings": {sc: results[sc].warnings for sc in ready},
+        "n_shops": len(shops),
+        "target_file": target_file.filename or "",
+        "stock_file": stock_file.filename or "",
+        "promo_start": start.isoformat(),
+        "promo_end": end.isoformat(),
+        "promo_days": promo.days,
+        "dispatch_days": promo.effective_dispatch_days,
+        "as_of": date.today().isoformat(),
+        "warehouse_sites": sorted(warehouse_codes),
+        "has_sales": has_sales,
+        "has_moq": bool(parsed_s.mapped.get("moq")),
+        # Snapshot the names so the page keeps the wording it was computed
+        # with, even if the labels are renamed while it is still open.
+        "scenario_labels": db.scenario_labels(),
+        "rp_gate_shops": gate,
+    }
+    run = runstore.put(period, db.now(), name, params, results)
+    db.log_usage(period, name, list(results), run.n_sku, run.n_short)
 
-    stock_upload = db.create_upload(
-        "stock",
-        period,
-        stock_file.filename or "",
-        name,
-        len(parsed_s.rows),
-        {"mapped": parsed_s.mapped, "warnings": parsed_s.warnings},
-    )
-    db.add_stock(stock_upload, parsed_s.rows)
-
-    run_id = db.create_run(
-        period,
-        target_upload,
-        stock_upload,
-        name,
-        {
-            "scenarios": ready,
-            "share_totals": {sc: sum(shares[sc].values()) for sc in ready},
-            "warnings": {sc: results[sc].warnings for sc in ready},
-            "n_shops": len(shops),
-            "target_file": target_file.filename or "",
-            "stock_file": stock_file.filename or "",
-            "promo_start": start.isoformat(),
-            "promo_end": end.isoformat(),
-            "promo_days": promo.days,
-            "dispatch_days": promo.effective_dispatch_days,
-            "as_of": date.today().isoformat(),
-            "warehouse_sites": sorted(warehouse_codes),
-            "has_sales": has_sales,
-            "has_moq": bool(parsed_s.mapped.get("moq")),
-            # Snapshot the names so an old batch keeps the wording it was
-            # computed with, even after the labels are renamed.
-            "scenario_labels": db.scenario_labels(),
-            "rp_gate_shops": gate,
-        },
-    )
-    db.save_results(run_id, results)
-
-    return RedirectResponse(f"/run/{run_id}", status_code=303)
+    return RedirectResponse(f"/run/{run.id}", status_code=303)
 
 
 @app.get("/run/{run_id}", response_class=HTMLResponse)
-def run_result(request: Request, run_id: int):
+def run_result(request: Request, run_id: str):
     auth.require_user(request)
-    run = db.get_run(run_id)
+    run = runstore.get(run_id)
     if not run:
-        return back("/runs", "找不到這個計算批次", "error")
+        return back("/runs", _expired(), "warn")
 
-    results = _load_results(run_id)
+    results = run.results
     compare_rows = calc.compare_scenarios(results)
     # Every scenario gets an entry, so templates can iterate A/B/C safely even
     # when a month only has one plan configured.
-    totals = {sc: db.run_totals(run_id, sc) for sc in db.SCENARIOS}
-    params = _run_params(run)
+    totals = {sc: _totals(results.get(sc)) for sc in db.SCENARIOS}
+    params = run.params
 
     # Cheapest scenario by dispatch volume. Shortfall is identical across
     # scenarios by construction (same target, same stock), so ranking by it
@@ -788,36 +758,37 @@ def run_result(request: Request, run_id: int):
         schedule=schedule,
         today=today,
         days_to_start=days_to_start,
+        keep_minutes=runstore.TTL_SECONDS // 60,
     )
 
 
 @app.get("/run/{run_id}/detail", response_class=HTMLResponse)
 def run_detail(
     request: Request,
-    run_id: int,
+    run_id: str,
     scenario: str = "A",
     sku: str = "",
     only_need: int = 0,
 ):
     auth.require_user(request)
-    run = db.get_run(run_id)
+    run = runstore.get(run_id)
     if not run:
-        return back("/runs", "找不到這個計算批次", "error")
+        return back("/runs", _expired(), "warn")
 
     scenario = scenario if scenario in db.SCENARIOS else "A"
-    skus = db.get_run_skus(run_id, scenario)
-    available = [sc for sc in db.SCENARIOS if db.run_totals(run_id, sc).get("n_sku")]
+    res = run.results.get(scenario)
+    skus = _sorted_skus(res)
+    available = [sc for sc in db.SCENARIOS if run.results.get(sc) and run.results[sc].skus]
+    all_lines = res.lines if res else []
 
     if sku:
-        lines = db.get_run_lines(run_id, scenario, sku)
+        lines = _sorted_lines([ln for ln in all_lines if ln.sku == sku])
         by_shop: List[dict] = []
-        selected = next((s for s in skus if s["sku"] == sku), None)
+        selected = next((s for s in skus if s.sku == sku), None)
     else:
         lines = []
         selected = None
-        by_shop = [dict(r) for r in db.dispatch_by_shop(run_id, scenario, bool(only_need))]
-
-    params = _run_params(run)
+        by_shop = _by_shop(all_lines, bool(only_need))
 
     return render(
         request,
@@ -831,45 +802,48 @@ def run_detail(
         sku=sku,
         only_need=only_need,
         available_scenarios=available,
-        labels=_run_labels(params),
-        gate=_run_gate(params),
+        labels=_run_labels(run.params),
+        gate=_run_gate(run.params),
+        keep_minutes=runstore.TTL_SECONDS // 60,
     )
 
 
 @app.get("/run/{run_id}/export.xlsx")
-def run_export(request: Request, run_id: int):
+def run_export(request: Request, run_id: str):
     auth.require_user(request)
-    run = db.get_run(run_id)
+    run = runstore.get(run_id)
     if not run:
-        return back("/runs", "找不到這個計算批次", "error")
+        return back("/runs", _expired(), "warn")
 
-    results = _load_results(run_id, with_lines=True)
-    rows = calc.compare_scenarios(results)
-    params = _run_params(run)
+    rows = calc.compare_scenarios(run.results)
     data = excel_io.export_run(
-        dict(run),
-        results,
+        {
+            "period": run.period,
+            "created_at": run.created_at,
+            "created_by": run.created_by,
+            "n_sku": run.n_sku,
+            "n_short": run.n_short,
+        },
+        run.results,
         rows,
-        tuple(results),
-        labels=_run_labels(params),
-        gate_shops=_run_gate(params),
-        params=params,
+        tuple(run.results),
+        labels=_run_labels(run.params),
+        gate_shops=_run_gate(run.params),
+        params=run.params,
     )
     stamp = datetime.now().strftime("%Y%m%d%H%M")
-    return _xlsx(data, f"派貨計算_{run['period']}_{stamp}.xlsx")
-
-
-@app.post("/run/{run_id}/delete")
-def run_delete(request: Request, run_id: int):
-    auth.require_admin(request)
-    db.delete_run(run_id)
-    return back("/runs", "已刪除批次")
+    return _xlsx(data, f"派貨計算_{run.period}_{stamp}.xlsx")
 
 
 @app.get("/runs", response_class=HTMLResponse)
 def runs_page(request: Request):
     auth.require_user(request)
-    return render(request, "runs.html", runs=db.list_runs(limit=100))
+    return render(
+        request,
+        "runs.html",
+        usage=db.list_usage(limit=200),
+        keep_minutes=runstore.TTL_SECONDS // 60,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -877,13 +851,12 @@ def runs_page(request: Request):
 # ---------------------------------------------------------------------------
 
 
-def _run_params(run) -> dict:
-    import json
-
-    try:
-        return json.loads(run["params_json"] or "{}")
-    except (ValueError, TypeError):
-        return {}
+def _expired() -> str:
+    return (
+        "計算結果不會保存，只在計算後保留約 "
+        f"{runstore.TTL_SECONDS // 60} 分鐘（重新部署亦會清掉）。"
+        "這個結果已經過期，請重新計算。"
+    )
 
 
 def _run_labels(params: dict) -> Dict[str, Any]:
@@ -914,91 +887,79 @@ def _run_schedule(params: dict) -> List[tuple]:
 
 
 def _run_gate(params: dict) -> List[str]:
-    """Gated shops that took part in this batch.
+    """Gated shops that took part in this calculation.
 
-    Batches computed before the rule existed have no key, and must not inherit
-    today's configuration — that would describe a run that never applied it.
+    The snapshot is used rather than the live setting: showing today's gate on a
+    result computed before it existed would describe a run that never applied it.
     """
     gate = params.get("rp_gate_shops")
     return gate if isinstance(gate, list) else []
 
 
-def _load_results(run_id: int, with_lines: bool = False) -> Dict[str, calc.ScenarioResult]:
-    """Rebuild per-SKU results from storage.
+def _totals(res) -> Dict[str, int]:
+    """Per-scenario sums the result page shows, straight off the live result.
 
-    ``with_lines`` also reloads the per-shop rows, which the export needs but the
-    summary pages do not.
+    Mirrors the keys ``db.run_totals`` used to produce, so templates did not
+    have to change when the results stopped being stored.
     """
-    run = db.get_run(run_id)
-    params = _run_params(run)
-    totals = params.get("share_totals", {})
-    warnings = params.get("warnings", {})
+    keys = (
+        "target_qty", "dispatch_target", "total_stock", "total_pending",
+        "warehouse_qty", "warehouse_pending", "total_dispatch", "need_qty",
+        "short_qty", "blocked_qty", "expected_sales", "gap_target",
+        "shortfall_qty", "surplus_qty",
+    )
+    if res is None:
+        out = {k: 0 for k in keys}
+        out.update({"n_sku": 0, "n_short": 0})
+        return out
 
-    out: Dict[str, calc.ScenarioResult] = {}
-    for sc in db.SCENARIOS:
-        rows = db.get_run_skus(run_id, sc)
-        if not rows:
-            continue
-        skus = [
-            calc.SkuSummary(
-                sku=r["sku"],
-                description=r["description"],
-                target_qty=r["target_qty"],
-                total_alloc=r["total_alloc"],
-                total_stock=r["total_stock"],
-                total_dispatch=r["total_dispatch"],
-                surplus_qty=r["surplus_qty"],
-                shortfall_qty=r["shortfall_qty"],
-                n_shops_needing=r["n_shops_needing"],
-                coverage_status=r["coverage_status"],
-                moq=r["moq"],
-                dispatch_target=r["dispatch_target"] or 0,
-                total_pending=r["total_pending"] or 0,
-                warehouse_qty=r["warehouse_qty"] or 0,
-                warehouse_pending=r["warehouse_pending"] or 0,
-                daily_rate=r["daily_rate"] or 0.0,
-                expected_sales=r["expected_sales"] or 0,
-                gap_target=r["gap_target"] or 0,
-                need_qty=r["need_qty"] or 0,
-                short_qty=r["short_qty"] or 0,
-                blocked_qty=r["blocked_qty"] or 0,
-                gap_supply=r["gap_supply"] or 0,
-            )
-            for r in rows
-        ]
-        lines = (
-            [
-                calc.Line(
-                    sku=r["sku"],
-                    shop_code=r["shop_code"],
-                    share_pct=r["share_pct"],
-                    alloc_qty=r["alloc_qty"],
-                    stock_qty=r["stock_qty"],
-                    gap_qty=r["gap_qty"],
-                    dispatch_qty=r["dispatch_qty"],
-                    surplus_qty=r["surplus_qty"],
-                    rp_type=r["rp_type"] or "",
-                    blocked=bool(r["blocked"]),
-                    blocked_qty=r["blocked_qty"] or 0,
-                    pending_qty=r["pending_qty"] or 0,
-                    daily_rate=r["daily_rate"] or 0.0,
-                    expected_sales=r["expected_sales"] or 0,
-                    need_qty=r["need_qty"] or 0,
-                    short_qty=r["short_qty"] or 0,
-                )
-                for r in db.get_scenario_lines(run_id, sc)
-            ]
-            if with_lines
-            else []
-        )
-        out[sc] = calc.ScenarioResult(
-            scenario=sc,
-            lines=lines,
-            skus=skus,
-            share_total=float(totals.get(sc, 1.0)),
-            warnings=list(warnings.get(sc, [])),
-        )
+    out = {k: sum(getattr(s, k, 0) for s in res.skus) for k in keys}
+    out["n_sku"] = len(res.skus)
+    out["n_short"] = sum(1 for s in res.skus if s.coverage_status == calc.COVERAGE_SHORT)
     return out
+
+
+def _sorted_skus(res) -> List[Any]:
+    """Short SKUs first, then by how much they fall short — same as before."""
+    if not res:
+        return []
+    return sorted(
+        res.skus,
+        key=lambda s: (0 if s.shortfall_qty > 0 else 1, -s.shortfall_qty, s.sku),
+    )
+
+
+def _sorted_lines(lines) -> List[Any]:
+    """Shop order from the master file, so every report reads the same way."""
+    order = {row["code"]: i for i, row in enumerate(db.list_shops())}
+    return sorted(lines, key=lambda ln: (order.get(ln.shop_code, 9999), ln.shop_code))
+
+
+def _by_shop(lines, only_need: bool) -> List[dict]:
+    """Whole-scenario totals per shop, the aggregate view of the detail page."""
+    agg: Dict[str, dict] = {}
+    for ln in lines:
+        row = agg.setdefault(
+            ln.shop_code,
+            {
+                "shop_code": ln.shop_code,
+                "alloc": 0,
+                "stock": 0,
+                "dispatch": 0,
+                "surplus": 0,
+                "n_sku": 0,
+            },
+        )
+        row["alloc"] += ln.alloc_qty
+        row["stock"] += ln.stock_qty
+        row["dispatch"] += ln.dispatch_qty
+        row["surplus"] += ln.surplus_qty
+        if ln.dispatch_qty > 0:
+            row["n_sku"] += 1
+
+    rows = [r for r in agg.values() if not only_need or r["dispatch"] > 0]
+    rows.sort(key=lambda r: (-r["dispatch"], r["shop_code"]))
+    return rows
 
 
 def _xlsx(data: bytes, filename: str) -> Response:

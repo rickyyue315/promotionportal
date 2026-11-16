@@ -115,7 +115,7 @@
     </div>
     <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
       <span class="dim" style="font-size:12.5px">
-        改名不影響歷史批次：每個批次會保留計算當時的名稱。
+        改名不影響已開啟的結果：計算時會快照當時的名稱。
       </span>
       <button class="btn primary" type="submit">儲存設定</button>
     </div>
@@ -125,7 +125,7 @@
 <section class="card">
   <header>
     <h2>資料儲存</h2>
-    <span class="hint">佔比、批次、上載紀錄都在同一個資料庫</span>
+    <span class="hint">每月佔比與使用紀錄都在同一個資料庫</span>
   </header>
   <div class="body flush">
     <table class="tbl">
@@ -186,7 +186,7 @@
           <span class="mono">New Volume</span>，mount path 填 <span class="mono">/data</span> 後重新部署；
           本程式會自動改用 volume 路徑，不必再手動設 <span class="mono">DATA_DIR</span>。
         {% else %}
-          要搬機或做大改動前，先下載一份備份。檔案已包含店舖、每月佔比、上載與批次結果。
+          要搬機或做大改動前，先下載一份備份。檔案已包含店舖與每月佔比。
         {% endif %}
       </span>
     </div>

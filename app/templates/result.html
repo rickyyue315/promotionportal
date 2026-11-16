@@ -6,14 +6,22 @@
   <div>
     <h1>計算結果 · {{ run.period }}</h1>
     <div class="desc">
-      批次 #{{ run.id }} ｜ {{ run.created_at | replace('T',' ') }} ｜ {{ run.created_by or '—' }}
+      {{ run.created_at | replace('T',' ') }} ｜ {{ run.created_by or '—' }}
       ｜ {{ run.n_sku }} 個 SKU
     </div>
   </div>
   <div class="actions">
-    <a class="btn" href="/runs">回歷史</a>
+    <a class="btn" href="/runs">使用紀錄</a>
     <a class="btn primary" href="/run/{{ run.id }}/export.xlsx">匯出 Excel</a>
   </div>
+</div>
+
+<div class="alert warn">
+  <span class="tag">請即時匯出</span>
+  <span>
+    計算結果不會存入資料庫，只在畫面保留約 {{ keep_minutes }} 分鐘；
+    重新部署、關掉容器或逾時後就要重新計算。需要留底請現在按「匯出 Excel」。
+  </span>
 </div>
 
 {% if params.promo_start %}

@@ -23,7 +23,7 @@ import sqlite3
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 log = logging.getLogger("portal.db")
 
@@ -111,108 +111,19 @@ CREATE TABLE IF NOT EXISTS setting (
     value TEXT NOT NULL DEFAULT ''
 );
 
-CREATE TABLE IF NOT EXISTS upload (
-    id          INTEGER PRIMARY KEY,
-    kind        TEXT NOT NULL,
-    period      TEXT NOT NULL,
-    filename    TEXT NOT NULL DEFAULT '',
-    uploaded_at TEXT NOT NULL,
-    uploaded_by TEXT NOT NULL DEFAULT '',
-    n_rows      INTEGER NOT NULL DEFAULT 0,
-    meta_json   TEXT NOT NULL DEFAULT '{}'
+-- What a calculation leaves behind: a timestamp, not a copy of the work.
+-- Targets, shop stock and every computed line live in memory only
+-- (see app/runstore.py) and disappear with the process.
+CREATE TABLE IF NOT EXISTS usage_log (
+    id        INTEGER PRIMARY KEY,
+    at        TEXT NOT NULL,
+    user      TEXT NOT NULL DEFAULT '',
+    period    TEXT NOT NULL DEFAULT '',
+    scenarios TEXT NOT NULL DEFAULT '',
+    n_sku     INTEGER NOT NULL DEFAULT 0,
+    n_short   INTEGER NOT NULL DEFAULT 0
 );
-
-CREATE TABLE IF NOT EXISTS sku_target (
-    id          INTEGER PRIMARY KEY,
-    upload_id   INTEGER NOT NULL REFERENCES upload(id) ON DELETE CASCADE,
-    sku         TEXT NOT NULL,
-    description TEXT NOT NULL DEFAULT '',
-    target_qty  INTEGER NOT NULL,
-    -- Legacy: MOQ now comes from the stock file. Kept so old databases open.
-    moq         INTEGER NOT NULL DEFAULT 1
-);
-CREATE INDEX IF NOT EXISTS ix_sku_target_upload ON sku_target(upload_id);
-
-CREATE TABLE IF NOT EXISTS shop_stock (
-    id              INTEGER PRIMARY KEY,
-    upload_id       INTEGER NOT NULL REFERENCES upload(id) ON DELETE CASCADE,
-    sku             TEXT NOT NULL,
-    shop_code       TEXT NOT NULL,
-    qty             INTEGER NOT NULL DEFAULT 0,
-    rp_type         TEXT NOT NULL DEFAULT '',
-    pending_qty     INTEGER NOT NULL DEFAULT 0,
-    last_month_sold INTEGER NOT NULL DEFAULT 0,
-    mtd_sold        INTEGER NOT NULL DEFAULT 0,
-    launch_date     TEXT NOT NULL DEFAULT ''
-);
-CREATE INDEX IF NOT EXISTS ix_shop_stock_upload ON shop_stock(upload_id);
-CREATE INDEX IF NOT EXISTS ix_shop_stock_sku ON shop_stock(upload_id, sku);
-
-CREATE TABLE IF NOT EXISTS run (
-    id                INTEGER PRIMARY KEY,
-    period            TEXT NOT NULL,
-    target_upload_id  INTEGER REFERENCES upload(id),
-    stock_upload_id   INTEGER REFERENCES upload(id),
-    created_at        TEXT NOT NULL,
-    created_by        TEXT NOT NULL DEFAULT '',
-    params_json       TEXT NOT NULL DEFAULT '{}',
-    n_sku             INTEGER NOT NULL DEFAULT 0,
-    n_short           INTEGER NOT NULL DEFAULT 0,
-    note              TEXT NOT NULL DEFAULT ''
-);
-
-CREATE TABLE IF NOT EXISTS run_sku (
-    id             INTEGER PRIMARY KEY,
-    run_id         INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-    scenario       TEXT NOT NULL,
-    sku            TEXT NOT NULL,
-    description    TEXT NOT NULL DEFAULT '',
-    target_qty     INTEGER NOT NULL,
-    total_alloc    INTEGER NOT NULL,
-    total_stock    INTEGER NOT NULL,
-    total_dispatch INTEGER NOT NULL,
-    surplus_qty    INTEGER NOT NULL,
-    shortfall_qty  INTEGER NOT NULL,
-    n_shops_needing INTEGER NOT NULL,
-    coverage_status TEXT NOT NULL,
-    moq            INTEGER NOT NULL DEFAULT 1,
-    dispatch_target INTEGER NOT NULL DEFAULT 0,
-    total_pending  INTEGER NOT NULL DEFAULT 0,
-    warehouse_qty  INTEGER NOT NULL DEFAULT 0,
-    warehouse_pending INTEGER NOT NULL DEFAULT 0,
-    daily_rate     REAL NOT NULL DEFAULT 0,
-    expected_sales INTEGER NOT NULL DEFAULT 0,
-    gap_target     INTEGER NOT NULL DEFAULT 0,
-    need_qty       INTEGER NOT NULL DEFAULT 0,
-    short_qty      INTEGER NOT NULL DEFAULT 0,
-    blocked_qty    INTEGER NOT NULL DEFAULT 0,
-    gap_supply     INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS ix_run_sku ON run_sku(run_id, scenario);
-
-CREATE TABLE IF NOT EXISTS run_line (
-    id           INTEGER PRIMARY KEY,
-    run_id       INTEGER NOT NULL REFERENCES run(id) ON DELETE CASCADE,
-    scenario     TEXT NOT NULL,
-    sku          TEXT NOT NULL,
-    shop_code    TEXT NOT NULL,
-    share_pct    REAL NOT NULL,
-    alloc_qty    INTEGER NOT NULL,
-    stock_qty    INTEGER NOT NULL,
-    gap_qty      INTEGER NOT NULL,
-    dispatch_qty INTEGER NOT NULL,
-    surplus_qty  INTEGER NOT NULL,
-    rp_type      TEXT NOT NULL DEFAULT '',
-    blocked      INTEGER NOT NULL DEFAULT 0,
-    blocked_qty  INTEGER NOT NULL DEFAULT 0,
-    pending_qty  INTEGER NOT NULL DEFAULT 0,
-    daily_rate   REAL NOT NULL DEFAULT 0,
-    expected_sales INTEGER NOT NULL DEFAULT 0,
-    need_qty     INTEGER NOT NULL DEFAULT 0,
-    short_qty    INTEGER NOT NULL DEFAULT 0
-);
-CREATE INDEX IF NOT EXISTS ix_run_line_sku ON run_line(run_id, scenario, sku);
-CREATE INDEX IF NOT EXISTS ix_run_line_shop ON run_line(run_id, scenario, shop_code);
+CREATE INDEX IF NOT EXISTS ix_usage_at ON usage_log(at);
 """
 
 
@@ -246,37 +157,19 @@ def init_db() -> None:
 # alters an existing table, so older databases need these added explicitly.
 _ADDED_COLUMNS = {
     "shop": {"om": "TEXT NOT NULL DEFAULT ''"},
-    "shop_stock": {
-        "rp_type": "TEXT NOT NULL DEFAULT ''",
-        "pending_qty": "INTEGER NOT NULL DEFAULT 0",
-        "last_month_sold": "INTEGER NOT NULL DEFAULT 0",
-        "mtd_sold": "INTEGER NOT NULL DEFAULT 0",
-        "launch_date": "TEXT NOT NULL DEFAULT ''",
-    },
-    "run_sku": {
-        "dispatch_target": "INTEGER NOT NULL DEFAULT 0",
-        "total_pending": "INTEGER NOT NULL DEFAULT 0",
-        "warehouse_qty": "INTEGER NOT NULL DEFAULT 0",
-        "warehouse_pending": "INTEGER NOT NULL DEFAULT 0",
-        "daily_rate": "REAL NOT NULL DEFAULT 0",
-        "expected_sales": "INTEGER NOT NULL DEFAULT 0",
-        "gap_target": "INTEGER NOT NULL DEFAULT 0",
-        "need_qty": "INTEGER NOT NULL DEFAULT 0",
-        "short_qty": "INTEGER NOT NULL DEFAULT 0",
-        "blocked_qty": "INTEGER NOT NULL DEFAULT 0",
-        "gap_supply": "INTEGER NOT NULL DEFAULT 0",
-    },
-    "run_line": {
-        "rp_type": "TEXT NOT NULL DEFAULT ''",
-        "blocked": "INTEGER NOT NULL DEFAULT 0",
-        "blocked_qty": "INTEGER NOT NULL DEFAULT 0",
-        "pending_qty": "INTEGER NOT NULL DEFAULT 0",
-        "daily_rate": "REAL NOT NULL DEFAULT 0",
-        "expected_sales": "INTEGER NOT NULL DEFAULT 0",
-        "need_qty": "INTEGER NOT NULL DEFAULT 0",
-        "short_qty": "INTEGER NOT NULL DEFAULT 0",
-    },
 }
+
+# Tables from the era when every upload and every computed line was stored.
+# Dropped on sight: keeping them would leave the commercial data they describe
+# on disk, which is exactly what this design no longer does.
+_LEGACY_TABLES = (
+    "run_line",
+    "run_sku",
+    "run",
+    "sku_target",
+    "shop_stock",
+    "upload",
+)
 
 
 def _migrate(conn: sqlite3.Connection) -> None:
@@ -286,18 +179,8 @@ def _migrate(conn: sqlite3.Connection) -> None:
             if name not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {name} {decl}")
 
-    # Rows written before the cover columns existed have need_qty = 0 next to a
-    # real dispatch, which reads as "no demand but we sent 50". A genuine zero
-    # need can never carry a dispatch, so this is a safe, repeatable repair.
-    conn.execute(
-        "UPDATE run_line SET need_qty = dispatch_qty "
-        "WHERE need_qty = 0 AND dispatch_qty > 0"
-    )
-    conn.execute(
-        "UPDATE run_sku SET need_qty = total_dispatch, "
-        "dispatch_target = total_alloc "
-        "WHERE need_qty = 0 AND total_dispatch > 0"
-    )
+    for table in _LEGACY_TABLES:
+        conn.execute(f"DROP TABLE IF EXISTS {table}")
 
 
 def _seed_settings(conn: sqlite3.Connection) -> None:
@@ -535,8 +418,7 @@ def save_shares_bulk(
 def list_periods() -> List[str]:
     with db() as conn:
         rows = conn.execute(
-            "SELECT DISTINCT period FROM share_set "
-            "UNION SELECT DISTINCT period FROM run ORDER BY 1 DESC"
+            "SELECT DISTINCT period FROM share_set ORDER BY period DESC"
         ).fetchall()
     return [r["period"] for r in rows]
 
@@ -652,261 +534,46 @@ def backup_to(dest: Path) -> Path:
 
 
 # ---------------------------------------------------------------------------
-# uploads
+# usage log — the only trace a calculation leaves
 # ---------------------------------------------------------------------------
 
 
-def create_upload(
-    kind: str,
+def log_usage(
     period: str,
-    filename: str,
-    user: str,
-    n_rows: int,
-    meta: Optional[dict] = None,
-) -> int:
+    user: str = "",
+    scenarios: Sequence[str] = (),
+    n_sku: int = 0,
+    n_short: int = 0,
+) -> None:
+    """Record *that* a calculation ran, never what was in it."""
     with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO upload (kind, period, filename, uploaded_at, uploaded_by, "
-            "n_rows, meta_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
-            (kind, period, filename, now(), user, n_rows, json.dumps(meta or {})),
-        )
-        return int(cur.lastrowid)
-
-
-def add_targets(upload_id: int, rows: Iterable[Tuple[str, str, int]]) -> None:
-    """Target rows carry no MOQ: the minimum order comes from the stock file."""
-    with db() as conn:
-        conn.executemany(
-            "INSERT INTO sku_target (upload_id, sku, description, target_qty) "
-            "VALUES (?, ?, ?, ?)",
-            [(upload_id, *r) for r in rows],
-        )
-
-
-def add_stock(upload_id: int, rows: Iterable[Any]) -> None:
-    """Rows are ``StockRow`` objects from the stock parser."""
-    payload = [
-        (
-            upload_id,
-            r.sku,
-            r.shop,
-            r.qty,
-            r.rp_type,
-            r.pending,
-            r.last_month_sold,
-            r.mtd_sold,
-            r.launch_date.isoformat() if r.launch_date else "",
-        )
-        for r in rows
-    ]
-    with db() as conn:
-        conn.executemany(
-            "INSERT INTO shop_stock (upload_id, sku, shop_code, qty, rp_type, "
-            "pending_qty, last_month_sold, mtd_sold, launch_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            payload,
-        )
-
-
-def get_upload(upload_id: int) -> Optional[sqlite3.Row]:
-    with db() as conn:
-        return conn.execute("SELECT * FROM upload WHERE id = ?", (upload_id,)).fetchone()
-
-
-def list_uploads(kind: str, period: Optional[str] = None) -> List[sqlite3.Row]:
-    sql = "SELECT * FROM upload WHERE kind = ?"
-    args: List[Any] = [kind]
-    if period:
-        sql += " AND period = ?"
-        args.append(period)
-    sql += " ORDER BY id DESC"
-    with db() as conn:
-        return conn.execute(sql, args).fetchall()
-
-
-def load_targets(upload_id: int) -> List[Tuple[str, str, int]]:
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT sku, description, target_qty FROM sku_target "
-            "WHERE upload_id = ? ORDER BY id",
-            (upload_id,),
-        ).fetchall()
-    return [(r["sku"], r["description"], int(r["target_qty"])) for r in rows]
-
-
-def load_stock(upload_id: int) -> Dict[str, Dict[str, int]]:
-    with db() as conn:
-        rows = conn.execute(
-            "SELECT sku, shop_code, qty FROM shop_stock WHERE upload_id = ?",
-            (upload_id,),
-        ).fetchall()
-    out: Dict[str, Dict[str, int]] = {}
-    for r in rows:
-        out.setdefault(r["sku"], {})[r["shop_code"]] = int(r["qty"])
-    return out
-
-
-# ---------------------------------------------------------------------------
-# runs
-# ---------------------------------------------------------------------------
-
-
-def create_run(
-    period: str,
-    target_upload_id: int,
-    stock_upload_id: int,
-    user: str,
-    params: dict,
-) -> int:
-    with db() as conn:
-        cur = conn.execute(
-            "INSERT INTO run (period, target_upload_id, stock_upload_id, created_at, "
-            "created_by, params_json) VALUES (?, ?, ?, ?, ?, ?)",
-            (period, target_upload_id, stock_upload_id, now(), user, json.dumps(params)),
-        )
-        return int(cur.lastrowid)
-
-
-def save_results(run_id: int, results: Dict[str, Any]) -> None:
-    sku_rows: List[tuple] = []
-    line_rows: List[tuple] = []
-
-    for scenario, res in results.items():
-        for s in res.skus:
-            sku_rows.append(
-                (
-                    run_id, scenario, s.sku, s.description, s.target_qty,
-                    s.total_alloc, s.total_stock, s.total_dispatch, s.surplus_qty,
-                    s.shortfall_qty, s.n_shops_needing, s.coverage_status, s.moq,
-                    s.dispatch_target, s.total_pending, s.warehouse_qty,
-                    s.warehouse_pending, s.daily_rate, s.expected_sales,
-                    s.gap_target, s.need_qty, s.short_qty, s.blocked_qty,
-                    s.gap_supply,
-                )
-            )
-        for ln in res.lines:
-            line_rows.append(
-                (
-                    run_id, scenario, ln.sku, ln.shop_code, ln.share_pct,
-                    ln.alloc_qty, ln.stock_qty, ln.gap_qty, ln.dispatch_qty,
-                    ln.surplus_qty, ln.rp_type, 1 if ln.blocked else 0,
-                    ln.blocked_qty, ln.pending_qty, ln.daily_rate,
-                    ln.expected_sales, ln.need_qty, ln.short_qty,
-                )
-            )
-
-    n_sku = len({r[2] for r in sku_rows})
-    n_short = len({r[2] for r in sku_rows if r[11] == "short"})
-
-    with db() as conn:
-        conn.executemany(
-            "INSERT INTO run_sku (run_id, scenario, sku, description, target_qty, "
-            "total_alloc, total_stock, total_dispatch, surplus_qty, shortfall_qty, "
-            "n_shops_needing, coverage_status, moq, dispatch_target, total_pending, "
-            "warehouse_qty, warehouse_pending, daily_rate, expected_sales, "
-            "gap_target, need_qty, short_qty, blocked_qty, gap_supply) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            sku_rows,
-        )
-        conn.executemany(
-            "INSERT INTO run_line (run_id, scenario, sku, shop_code, share_pct, "
-            "alloc_qty, stock_qty, gap_qty, dispatch_qty, surplus_qty, rp_type, "
-            "blocked, blocked_qty, pending_qty, daily_rate, expected_sales, "
-            "need_qty, short_qty) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-            line_rows,
-        )
         conn.execute(
-            "UPDATE run SET n_sku = ?, n_short = ? WHERE id = ?",
-            (n_sku, n_short, run_id),
+            "INSERT INTO usage_log (at, user, period, scenarios, n_sku, n_short) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (now(), user, period, ",".join(scenarios), int(n_sku), int(n_short)),
         )
 
 
-def get_run(run_id: int) -> Optional[sqlite3.Row]:
-    with db() as conn:
-        return conn.execute("SELECT * FROM run WHERE id = ?", (run_id,)).fetchone()
-
-
-def list_runs(limit: int = 50) -> List[sqlite3.Row]:
+def list_usage(limit: int = 100) -> List[sqlite3.Row]:
     with db() as conn:
         return conn.execute(
-            "SELECT * FROM run ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT * FROM usage_log ORDER BY id DESC LIMIT ?", (limit,)
         ).fetchall()
 
 
-def get_run_skus(run_id: int, scenario: str) -> List[sqlite3.Row]:
+def latest_usage() -> Optional[sqlite3.Row]:
     with db() as conn:
         return conn.execute(
-            "SELECT * FROM run_sku WHERE run_id = ? AND scenario = ? "
-            "ORDER BY (shortfall_qty > 0) DESC, shortfall_qty DESC, sku",
-            (run_id, scenario),
-        ).fetchall()
+            "SELECT * FROM usage_log ORDER BY id DESC LIMIT 1"
+        ).fetchone()
 
 
-def get_run_lines(
-    run_id: int, scenario: str, sku: str
-) -> List[sqlite3.Row]:
-    with db() as conn:
-        return conn.execute(
-            "SELECT l.*, s.sort_order FROM run_line l "
-            "LEFT JOIN shop s ON s.code = l.shop_code "
-            "WHERE l.run_id = ? AND l.scenario = ? AND l.sku = ? "
-            "ORDER BY s.sort_order, l.shop_code",
-            (run_id, scenario, sku),
-        ).fetchall()
-
-
-def get_scenario_lines(run_id: int, scenario: str) -> List[sqlite3.Row]:
-    """Every line of one scenario — used when rebuilding a full export."""
-    with db() as conn:
-        return conn.execute(
-            "SELECT l.* FROM run_line l "
-            "LEFT JOIN shop s ON s.code = l.shop_code "
-            "WHERE l.run_id = ? AND l.scenario = ? "
-            "ORDER BY s.sort_order, l.shop_code, l.sku",
-            (run_id, scenario),
-        ).fetchall()
-
-
-def dispatch_by_shop(run_id: int, scenario: str, only_need: bool = False) -> List[sqlite3.Row]:
-    """Whole-scenario aggregate per shop, computed in SQL."""
-    sql = (
-        "SELECT shop_code, SUM(alloc_qty) AS alloc, SUM(stock_qty) AS stock, "
-        "SUM(dispatch_qty) AS dispatch, SUM(surplus_qty) AS surplus, "
-        "SUM(CASE WHEN dispatch_qty > 0 THEN 1 ELSE 0 END) AS n_sku "
-        "FROM run_line WHERE run_id = ? AND scenario = ? "
-    )
-    if only_need:
-        sql += "AND dispatch_qty > 0 "
-    sql += "GROUP BY shop_code ORDER BY dispatch DESC, shop_code"
-    with db() as conn:
-        return conn.execute(sql, (run_id, scenario)).fetchall()
-
-
-def run_totals(run_id: int, scenario: str) -> Dict[str, int]:
+def usage_summary(period: str) -> Dict[str, Any]:
+    """How many times a month was calculated, for the dashboard."""
     with db() as conn:
         row = conn.execute(
-            "SELECT COALESCE(SUM(target_qty),0) AS target_qty, "
-            "COALESCE(SUM(dispatch_target),0) AS dispatch_target, "
-            "COALESCE(SUM(total_stock),0) AS total_stock, "
-            "COALESCE(SUM(total_pending),0) AS total_pending, "
-            "COALESCE(SUM(warehouse_qty),0) AS warehouse_qty, "
-            "COALESCE(SUM(total_dispatch),0) AS total_dispatch, "
-            "COALESCE(SUM(need_qty),0) AS need_qty, "
-            "COALESCE(SUM(short_qty),0) AS short_qty, "
-            "COALESCE(SUM(blocked_qty),0) AS blocked_qty, "
-            "COALESCE(SUM(expected_sales),0) AS expected_sales, "
-            "COALESCE(SUM(gap_target),0) AS gap_target, "
-            "COALESCE(SUM(shortfall_qty),0) AS shortfall_qty, "
-            "COALESCE(SUM(surplus_qty),0) AS surplus_qty, "
-            "COUNT(*) AS n_sku, "
-            "SUM(CASE WHEN coverage_status = 'short' THEN 1 ELSE 0 END) AS n_short "
-            "FROM run_sku WHERE run_id = ? AND scenario = ?",
-            (run_id, scenario),
+            "SELECT COUNT(*) AS n, COALESCE(MAX(at), '') AS last "
+            "FROM usage_log WHERE period = ?",
+            (period,),
         ).fetchone()
-    return {k: int(row[k] or 0) for k in row.keys()}
-
-
-def delete_run(run_id: int) -> None:
-    with db() as conn:
-        conn.execute("DELETE FROM run WHERE id = ?", (run_id,))
+    return {"n": int(row["n"] or 0), "last": row["last"] or ""}

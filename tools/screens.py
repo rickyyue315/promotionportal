@@ -72,7 +72,7 @@ def shoot(client: TestClient, path: str, name: str, height: int = 1200) -> Path:
     return png
 
 
-def _hb87_demo(client: TestClient) -> int:
+def _hb87_demo(client: TestClient) -> str:
     """A small month that shows the HB87 RP Type gate in isolation."""
     from openpyxl import Workbook
 
@@ -130,7 +130,7 @@ def _hb87_demo(client: TestClient) -> int:
         },
         follow_redirects=False,
     )
-    return int(resp.headers["location"].rstrip("/").split("/")[-1])
+    return resp.headers["location"].rstrip("/").split("/")[-1]
 
 
 def main() -> None:
@@ -158,7 +158,7 @@ def main() -> None:
             },
             follow_redirects=False,
         )
-        run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+        run_id = resp.headers["location"].rstrip("/").split("/")[-1]
 
         print("rendering:")
         shoot(c, "/", "01_dashboard", 1250)

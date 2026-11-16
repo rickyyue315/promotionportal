@@ -12,7 +12,7 @@ import os
 from datetime import datetime
 from pathlib import Path
 
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 
 # Bump this whenever APP_VERSION changes; the README keeps the full history.
 RELEASED_AT = "2026-11-16"

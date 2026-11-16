@@ -1,14 +1,13 @@
 """End-to-end flow: login → import shares → upload → compute → export."""
 
 import io
-import json
 from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app import db, version
+from app import db, runstore, version
 from app.main import app
 
 SAMPLES = Path(__file__).resolve().parents[1] / "samples"
@@ -105,51 +104,55 @@ def test_full_flow(client):
     )
     assert resp.status_code == 303, resp.text
     assert resp.headers["location"].startswith("/run/"), resp.headers["location"]
-    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
 
     # --- result page renders and the numbers are sane ---
-    page = client.get(f"/run/{run_id}")
+    page = client.get(f"/run/{token}")
     assert page.status_code == 200
     assert "A／B／C 比較" in page.text
 
-    rows = db.get_run_skus(run_id, "A")
-    assert len(rows) == 10
+    run = runstore.get(token)
+    assert run is not None, "the result must be readable right after computing"
+    assert run.period == "2026-11"
+
+    assert len(run.results["A"].skus) == 10
 
     # Allocation must reconcile with the SKU target in every scenario.
-    for sc in ("A", "B", "C"):
-        for row in db.get_run_skus(run_id, sc):
-            assert row["total_alloc"] == row["target_qty"], (sc, row["sku"])
+    for sc, res in run.results.items():
+        for s in res.skus:
+            assert s.total_alloc == s.target_qty, (sc, s.sku)
 
     # Samples deliberately under-stock two SKUs; random noise may short others.
-    short = {r["sku"] for r in db.get_run_skus(run_id, "A") if r["coverage_status"] == "short"}
+    short = {s.sku for s in run.results["A"].skus if s.coverage_status == "short"}
     assert "111888009033" in short
     assert "110773004028" in short
-    for row in db.get_run_skus(run_id, "A"):
-        if row["sku"] in short:
-            assert row["shortfall_qty"] == row["target_qty"] - row["total_stock"]
+    for s in run.results["A"].skus:
+        if s.sku in short:
+            assert s.shortfall_qty == s.target_qty - s.total_stock
         else:
-            assert row["shortfall_qty"] == 0
+            assert s.shortfall_qty == 0
 
     # Same stock, different shares -> same shortfall, different dispatch.
-    totals = {sc: db.run_totals(run_id, sc) for sc in ("A", "B", "C")}
-    assert len({t["shortfall_qty"] for t in totals.values()}) == 1
-    assert len({t["total_dispatch"] for t in totals.values()}) > 1
+    shortfall = {sc: sum(s.shortfall_qty for s in r.skus) for sc, r in run.results.items()}
+    dispatch = {sc: sum(s.total_dispatch for s in r.skus) for sc, r in run.results.items()}
+    assert len(set(shortfall.values())) == 1
+    assert len(set(dispatch.values())) > 1
 
     # --- detail view, both aggregate and per-SKU ---
-    detail = client.get(f"/run/{run_id}/detail?scenario=A")
+    detail = client.get(f"/run/{token}/detail?scenario=A")
     assert detail.status_code == 200
     assert "各店派貨總量" in detail.text
 
     sku = "109991605010"
-    per_sku = client.get(f"/run/{run_id}/detail?scenario=A&sku={sku}")
+    per_sku = client.get(f"/run/{token}/detail?scenario=A&sku={sku}")
     assert per_sku.status_code == 200
     assert sku in per_sku.text
 
-    lines = db.get_run_lines(run_id, "A", sku)
+    lines = [ln for ln in run.results["A"].lines if ln.sku == sku]
     assert len(lines) == 20
 
     # --- export ---
-    xlsx = client.get(f"/run/{run_id}/export.xlsx")
+    xlsx = client.get(f"/run/{token}/export.xlsx")
     assert xlsx.status_code == 200
     assert xlsx.headers["content-type"].startswith(
         "application/vnd.openxmlformats"
@@ -172,6 +175,12 @@ def test_full_flow(client):
     detail_rows = list(wb["明細_A"].iter_rows(values_only=True))
     assert len(detail_rows) == 1 + 10 * 20
     assert detail_rows[0][:3] == ("SKU", "貨品名稱", "店舖")
+
+    # --- the only trace a calculation leaves is a timestamp ---
+    usage = db.list_usage(limit=5)
+    assert usage and usage[0]["period"] == "2026-11"
+    assert usage[0]["n_sku"] == 10
+    assert usage[0]["at"]
 
 
 def test_duplicate_sku_in_target_is_rejected(client):
@@ -335,36 +344,37 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
     )
     assert resp.status_code == 303, resp.text
     assert resp.headers["location"].startswith("/run/"), resp.headers["location"]
-    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
 
-    nd = db.get_run_lines(run_id, "A", "111058302001")
-    nd_hb87 = next(r for r in nd if r["shop_code"] == "HB87")
-    assert nd_hb87["dispatch_qty"] == 0
-    assert nd_hb87["blocked"] == 1
-    assert nd_hb87["blocked_qty"] == 50
-    assert nd_hb87["rp_type"] == "ND"
-    assert nd_hb87["gap_qty"] == 50  # the need is still visible
+    run = runstore.get(token)
+    nd = [ln for ln in run.results["A"].lines if ln.sku == "111058302001"]
+    nd_hb87 = next(r for r in nd if r.shop_code == "HB87")
+    assert nd_hb87.dispatch_qty == 0
+    assert nd_hb87.blocked is True
+    assert nd_hb87.blocked_qty == 50
+    assert nd_hb87.rp_type == "ND"
+    assert nd_hb87.gap_qty == 50  # the need is still visible
 
-    rf = db.get_run_lines(run_id, "A", "111058302002")
-    rf_hb87 = next(r for r in rf if r["shop_code"] == "HB87")
-    assert rf_hb87["dispatch_qty"] == 50
-    assert rf_hb87["blocked"] == 0
+    rf = [ln for ln in run.results["A"].lines if ln.sku == "111058302002"]
+    rf_hb87 = next(r for r in rf if r.shop_code == "HB87")
+    assert rf_hb87.dispatch_qty == 50
+    assert rf_hb87.blocked is False
 
-    detail = client.get(f"/run/{run_id}/detail?scenario=A&sku=111058302001")
+    detail = client.get(f"/run/{token}/detail?scenario=A&sku=111058302001")
     assert detail.status_code == 200
     assert "RP" in detail.text
-    assert nd_hb87["need_qty"] == 50
+    assert nd_hb87.need_qty == 50
     # Blocked by the RP rule, not by a lack of stock: the unit belongs to
     # blocked_qty only, so the shortage total stays about the warehouse.
-    assert nd_hb87["short_qty"] == 0
+    assert nd_hb87.short_qty == 0
 
     # The SKU-level numbers exclude the blocked half, so 需求/可派 reconcile.
-    sku_row = next(r for r in db.get_run_skus(run_id, "A") if r["sku"] == "111058302001")
-    assert sku_row["need_qty"] == 50
-    assert sku_row["total_dispatch"] == 50
-    assert sku_row["blocked_qty"] == 50
+    sku_row = next(s for s in run.results["A"].skus if s.sku == "111058302001")
+    assert sku_row.need_qty == 50
+    assert sku_row.total_dispatch == 50
+    assert sku_row.blocked_qty == 50
 
-    result = client.get(f"/run/{run_id}")
+    result = client.get(f"/run/{token}")
     assert "RP Type" in result.text
 
 
@@ -403,14 +413,15 @@ def test_moq_comes_from_the_stock_file_not_the_target(client):
         follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
-    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
 
-    row = db.get_run_skus(run_id, "A")[0]
-    assert row["moq"] == 12                     # from the stock file, not 99
-    assert row["need_qty"] == 108               # ceil(100 / 12) × 12
-    assert row["total_dispatch"] == 108
+    run = runstore.get(token)
+    row = run.results["A"].skus[0]
+    assert row.moq == 12                     # from the stock file, not 99
+    assert row.need_qty == 108               # ceil(100 / 12) × 12
+    assert row.total_dispatch == 108
 
-    params = json.loads(db.get_run(run_id)["params_json"])
+    params = run.params
     assert params["has_moq"] is True
     warnings = " ".join(params["warnings"]["A"])
     assert "已忽略" in warnings and "MOQ" in warnings
@@ -450,15 +461,15 @@ def test_stock_file_without_moq_does_not_round(client):
         follow_redirects=False,
     )
     assert resp.status_code == 303, resp.text
-    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
 
-    row = db.get_run_skus(run_id, "A")[0]
-    assert row["moq"] == 1
-    assert row["need_qty"] == 60
+    run = runstore.get(token)
+    row = run.results["A"].skus[0]
+    assert row.moq == 1
+    assert row.need_qty == 60
 
-    params = json.loads(db.get_run(run_id)["params_json"])
-    assert params["has_moq"] is False
-    assert any("沒有 MOQ 欄位" in w for w in params["warnings"]["A"])
+    assert run.params["has_moq"] is False
+    assert any("沒有 MOQ 欄位" in w for w in run.params["warnings"]["A"])
 
 
 def _sap_full_bytes(rows):
@@ -534,33 +545,34 @@ def test_sap_file_drives_warehouse_cap_and_sales(client):
     )
     assert resp.status_code == 303, resp.text
     assert resp.headers["location"].startswith("/run/"), resp.headers["location"]
-    run_id = int(resp.headers["location"].rstrip("/").split("/")[-1])
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
 
-    rows = {r["sku"]: r for r in db.get_run_skus(run_id, "A")}
+    run = runstore.get(token)
+    rows = {s.sku: s for s in run.results["A"].skus}
     capped = rows[sku_a]
-    assert capped["target_qty"] == 1400
-    assert capped["dispatch_target"] == 400          # 1400 x 4/14
-    assert capped["warehouse_qty"] == 100           # DC net stock is the ceiling
-    assert capped["need_qty"] == 400
-    assert capped["total_dispatch"] == 100
-    assert capped["short_qty"] == 300
+    assert capped.target_qty == 1400
+    assert capped.dispatch_target == 400          # 1400 x 4/14
+    assert capped.warehouse_qty == 100           # DC net stock is the ceiling
+    assert capped.need_qty == 400
+    assert capped.total_dispatch == 100
+    assert capped.short_qty == 300
 
     # D001 never receives an allocation of its own.
-    lines_a = db.get_run_lines(run_id, "A", sku_a)
-    assert "D001" not in {ln["shop_code"] for ln in lines_a}
-    assert {ln["shop_code"] for ln in lines_a if ln["share_pct"]} == {"HA19", "HA21"}
+    lines_a = [ln for ln in run.results["A"].lines if ln.sku == sku_a]
+    assert "D001" not in {ln.shop_code for ln in lines_a}
+    assert {ln.shop_code for ln in lines_a if ln.share_pct} == {"HA19", "HA21"}
 
     # Sales columns made it through to the per-shop numbers. 5 days on record,
     # 50 sold per shop -> 10/day each, 20/day across the two shops.
     fresh = rows[sku_new]
-    assert fresh["total_dispatch"] == 400
-    assert fresh["expected_sales"] == 280
-    assert fresh["gap_target"] == 1120
+    assert fresh.total_dispatch == 400
+    assert fresh.expected_sales == 280
+    assert fresh.gap_target == 1120
 
-    lines = db.get_run_lines(run_id, "A", sku_new)
-    assert [ln["daily_rate"] for ln in lines if ln["shop_code"] in ("HA19", "HA21")] == [10.0, 10.0]
+    lines = [ln for ln in run.results["A"].lines if ln.sku == sku_new]
+    assert [ln.daily_rate for ln in lines if ln.shop_code in ("HA19", "HA21")] == [10.0, 10.0]
 
-    page = client.get(f"/run/{run_id}")
+    page = client.get(f"/run/{token}")
     assert page.status_code == 200
     assert "派貨目標" in page.text
     assert "D001" in page.text
@@ -590,11 +602,19 @@ def test_scenario_labels_are_shown_and_snapshotted(client):
     assert "恆常推廣" in page.text
     assert "精彩價&amp;PIP" in page.text
 
-    # A batch keeps the wording it was computed with.
-    runs = [r for r in db.list_runs(limit=50) if r["period"] == "2026-12"]
-    run_id = runs[0]["id"]
-    result = client.get(f"/run/{run_id}")
-    assert "恆常推廣" in result.text
+    # A result keeps the wording it was computed with, even after a rename.
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO},
+        files={
+            "target_file": ("t.xlsx", (SAMPLES / "sample_target.xlsx").read_bytes()),
+            "stock_file": ("s.xlsx", (SAMPLES / "sample_stock_wide.xlsx").read_bytes()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+    assert "恆常推廣" in client.get(f"/run/{token}").text
 
     client.post(
         "/admin/settings",
@@ -602,8 +622,8 @@ def test_scenario_labels_are_shown_and_snapshotted(client):
               "optional_C": "1", "rp_gate_shops": "HB87", "warehouse_sites": "D001"},
         follow_redirects=False,
     )
-    assert "恆常推廣" in client.get(f"/run/{run_id}").text
-    assert "改名後" not in client.get(f"/run/{run_id}").text
+    assert "恆常推廣" in client.get(f"/run/{token}").text
+    assert "改名後" not in client.get(f"/run/{token}").text
 
 
 def test_user_role_cannot_open_admin(client):
