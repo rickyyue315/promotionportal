@@ -129,3 +129,20 @@ def test_store_drops_the_oldest_when_full():
     assert runstore.get(calls[0].id) is None
     assert runstore.get(calls[-1].id) is not None
     runstore.clear()
+
+
+def test_timestamps_are_hong_kong_wall_clock():
+    """A Railway container is UTC; the people reading the log are in Hong Kong."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    stamp = db.now()
+    # Naive on purpose: every template shows it as-is.
+    assert "+" not in stamp and stamp.count(":") == 2
+
+    stored = datetime.fromisoformat(stamp)
+    hk_now = datetime.now(ZoneInfo("Asia/Hong_Kong")).replace(tzinfo=None)
+    assert abs(hk_now - stored) < timedelta(minutes=2)
+
+    assert db.today().isoformat() == hk_now.date().isoformat()
+    assert db.current_period() == hk_now.strftime("%Y-%m")

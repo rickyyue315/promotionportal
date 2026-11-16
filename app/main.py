@@ -64,7 +64,7 @@ def render(request: Request, name: str, **ctx: Any) -> HTMLResponse:
         "scenarios": db.SCENARIOS,
         "labels": db.scenario_labels(),
         "rp_gate_shops": db.rp_gate_shops(),
-        "now": datetime.now().strftime("%Y-%m-%d %H:%M"),
+        "now": db.now_minute(),
     }
     base.update(ctx)
     return templates.TemplateResponse(request, name, base)
@@ -313,7 +313,7 @@ def backup_db(request: Request):
     starts from an empty disk again.
     """
     auth.require_admin(request)
-    stamp = datetime.now().strftime("%Y%m%d_%H%M")
+    stamp = db.stamp()
     with tempfile.TemporaryDirectory() as tmp:
         payload = db.backup_to(Path(tmp) / "portal.db").read_bytes()
     return Response(
@@ -450,7 +450,7 @@ def shares_template(request: Request, period: str = ""):
 
 def _period_options(selected: str, back_months: int = 6) -> List[str]:
     options = set(db.list_periods())
-    today = datetime.now()
+    today = datetime.now(db.APP_TZ)
     year, month = today.year, today.month
     for _ in range(back_months):
         options.add(f"{year:04d}-{month:02d}")
@@ -473,7 +473,7 @@ def run_new_page(request: Request, period: str = ""):
     period = period or db.current_period()
     status = db.share_status(period)
     required = [sc for sc in db.SCENARIOS if not status[sc]["optional"]]
-    today = date.today()
+    today = db.today()
     return render(
         request,
         "upload.html",
@@ -623,7 +623,7 @@ async def run_create(
         rp_gate_shops=gate,
         sales_by_sku=sales_by_sku if has_sales else None,
         promo=promo,
-        as_of=date.today(),
+        as_of=db.today(),
         warehouse_by_sku=warehouse_by_sku if has_warehouse else None,
         warehouse_pending_by_sku=warehouse_pending,
         moq_by_sku=moq_by_sku,
@@ -698,7 +698,7 @@ async def run_create(
         "promo_end": end.isoformat(),
         "promo_days": promo.days,
         "dispatch_days": promo.effective_dispatch_days,
-        "as_of": date.today().isoformat(),
+        "as_of": db.today().isoformat(),
         "warehouse_sites": sorted(warehouse_codes),
         "has_sales": has_sales,
         "has_moq": bool(parsed_s.mapped.get("moq")),
@@ -734,7 +734,7 @@ def run_result(request: Request, run_id: str):
     best_dispatch = min(active, key=lambda s: active[s]["total_dispatch"]) if active else None
 
     schedule = _run_schedule(params)
-    today = date.today()
+    today = db.today()
     days_to_start = (
         (schedule[0][1] - today).days
         if schedule and today < schedule[0][1]
@@ -831,7 +831,7 @@ def run_export(request: Request, run_id: str):
         gate_shops=_run_gate(run.params),
         params=run.params,
     )
-    stamp = datetime.now().strftime("%Y%m%d%H%M")
+    stamp = db.stamp()
     return _xlsx(data, f"派貨計算_{run.period}_{stamp}.xlsx")
 
 

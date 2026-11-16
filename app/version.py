@@ -11,8 +11,9 @@ from __future__ import annotations
 import os
 from datetime import datetime
 from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 
 # Bump this whenever APP_VERSION changes; the README keeps the full history.
 RELEASED_AT = "2026-11-16"
@@ -47,8 +48,19 @@ def _git_commit() -> str:
 COMMIT = _git_commit()
 
 # Process start, which for a container is the deploy. Shown as "啟動時間" so it
-# is not mistaken for the commit date.
-STARTED_AT = datetime.now().strftime("%Y-%m-%d %H:%M")
+# is not mistaken for the commit date. Railway runs on UTC; the people reading
+# this are in Hong Kong, so the label uses the same zone as the rest of the app.
+def _now_local() -> str:
+    name = os.environ.get("APP_TZ", "Asia/Hong_Kong").strip() or "Asia/Hong_Kong"
+    try:
+        tz = ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        tz = None
+    now = datetime.now(tz) if tz else datetime.now().astimezone()
+    return now.strftime("%Y-%m-%d %H:%M")
+
+
+STARTED_AT = _now_local()
 
 
 def label() -> str:

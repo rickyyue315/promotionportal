@@ -117,11 +117,17 @@
       <table class="tbl">
         <tbody>
           <tr><td class="dim">最近一次</td><td class="strong nowrap">{{ recent[0].at | replace('T', ' ') }}</td></tr>
-          <tr><td class="dim">期間 ／ 執行者</td><td>{{ recent[0].period }} ｜ {{ recent[0].user or '—' }}</td></tr>
+          <tr><td class="dim">月份 ／ 執行者</td><td>{{ recent[0].period }} ｜ {{ recent[0].user or '—' }}</td></tr>
           <tr><td class="dim">餐別</td><td>{{ (recent[0].scenarios or '—') | replace(',', '、') }}</td></tr>
-          <tr><td class="dim">SKU 數 ／ 不夠貨</td>
-            <td>{{ recent[0].n_sku }} 個 ／
-              <span class="{{ 'badge danger' if recent[0].n_short else 'badge ok' }}">{{ recent[0].n_short }}</span>
+          <tr><td class="dim">SKU 數</td><td>{{ recent[0].n_sku }} 個</td></tr>
+          <tr>
+            <td class="dim">不夠貨 SKU</td>
+            <td>
+              {% if recent[0].n_short %}
+                <span class="badge danger">{{ recent[0].n_short }}</span> 個
+              {% else %}
+                <span class="dim">0（全部夠貨）</span>
+              {% endif %}
             </td>
           </tr>
           {% if recent | length > 1 %}

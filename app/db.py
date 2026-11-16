@@ -21,11 +21,31 @@ import os
 import re
 import sqlite3
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 log = logging.getLogger("portal.db")
+
+
+def _app_tz():
+    """Hong Kong wall-clock time by default.
+
+    A Railway container runs on UTC, so a calculation made at 12:28 in Hong Kong
+    used to be stamped 04:28 — and the default period could even be the previous
+    month during the first eight hours of the 1st. ``APP_TZ`` overrides the zone;
+    the fixed offset is only a fallback for images without a tz database.
+    """
+    name = os.environ.get("APP_TZ", "Asia/Hong_Kong").strip() or "Asia/Hong_Kong"
+    try:
+        return ZoneInfo(name)
+    except (ZoneInfoNotFoundError, ValueError):
+        log.warning("Time zone %s unavailable, using UTC+8", name)
+        return timezone(timedelta(hours=8))
+
+
+APP_TZ = _app_tz()
 
 SCENARIOS = ("A", "B", "C")
 
@@ -201,11 +221,25 @@ def _seed_settings(conn: sqlite3.Connection) -> None:
 
 
 def now() -> str:
-    return datetime.now().isoformat(timespec="seconds")
+    """Local wall-clock time, naive on purpose: it is only ever displayed."""
+    return datetime.now(APP_TZ).replace(tzinfo=None).isoformat(timespec="seconds")
+
+
+def now_minute() -> str:
+    return datetime.now(APP_TZ).strftime("%Y-%m-%d %H:%M")
+
+
+def stamp() -> str:
+    """Filename stamp, e.g. 20261116_1235."""
+    return datetime.now(APP_TZ).strftime("%Y%m%d_%H%M")
+
+
+def today() -> date:
+    return datetime.now(APP_TZ).date()
 
 
 def current_period() -> str:
-    return datetime.now().strftime("%Y-%m")
+    return datetime.now(APP_TZ).strftime("%Y-%m")
 
 
 # ---------------------------------------------------------------------------

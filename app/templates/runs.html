@@ -6,7 +6,7 @@
   <div>
     <h1>使用紀錄</h1>
     <div class="desc">
-      系統只保存每月佔比；計算本身不落盤，這裡記錄誰在甚麼時候計過一次。
+      系統只保存每月佔比；計算本身不落盤，這裡記錄誰在甚麼時候計過一次。時間為香港時間。
     </div>
   </div>
   <div class="actions">
@@ -23,18 +23,23 @@
 </div>
 
 <section class="card">
+  <header>
+    <h2>每次計算</h2>
+    <span class="hint">日期時間 ｜ 月份 ｜ 餐別 ｜ 執行者 ｜ 規模 ｜ 缺貨</span>
+  </header>
   <div class="body flush">
     {% if usage %}
     <div class="table-wrap">
       <table class="tbl">
         <thead>
           <tr>
-            <th style="width:170px">日期與時間</th>
-            <th style="width:110px">期間</th>
-            <th style="width:110px">餐別</th>
-            <th>執行者</th>
-            <th class="num">SKU</th>
-            <th class="num">不夠貨</th>
+            <th style="width:160px">日期與時間</th>
+            <th style="width:90px">月份</th>
+            <th style="width:80px">餐別</th>
+            <th style="width:180px">執行者</th>
+            <th class="num" style="width:100px">SKU 數</th>
+            <th class="num" style="width:130px">不夠貨 SKU</th>
+            <th></th>
           </tr>
         </thead>
         <tbody>
@@ -47,15 +52,20 @@
             <td class="num">{{ u.n_sku }}</td>
             <td class="num">
               {% if u.n_short %}
-                <span class="badge danger">{{ u.n_short }}</span>
+                <span class="badge danger" title="有 {{ u.n_short }} 個 SKU 的 Target 大於全部存貨">{{ u.n_short }}</span>
               {% else %}
-                <span class="badge ok">0</span>
+                <span class="dim" title="全部 SKU 都夠貨">0</span>
               {% endif %}
             </td>
+            <td></td>
           </tr>
         {% endfor %}
         </tbody>
       </table>
+    </div>
+    <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
+      <strong>SKU 數</strong>＝該次計算涉及的 SKU 總數。
+      <strong>不夠貨 SKU</strong>＝Target 大於「店舖庫存＋在途＋倉存」的 SKU 數，<strong>0 代表全部夠貨</strong>。
     </div>
     {% else %}
     <div class="empty">
