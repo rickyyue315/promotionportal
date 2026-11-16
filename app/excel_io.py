@@ -17,7 +17,8 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
-from openpyxl.styles import Font, PatternFill
+from openpyxl.styles import Alignment, Font, PatternFill
+from openpyxl.utils import get_column_letter
 
 from .calc import supply_code
 
@@ -823,9 +824,35 @@ def parse_share_file(data: bytes) -> ParsedShares:
 # export
 # ---------------------------------------------------------------------------
 
-_HEAD_FILL = PatternFill("solid", fgColor="EDF1F5")
+_HEAD_FILL = PatternFill("solid", fgColor="FFEDF1F5")
 _HEAD_FONT = Font(bold=True)
 _MONEY = "#,##0"
+
+# The colours ops already paints these columns with by hand: yellow = raise a
+# PO, orange = raise an STO from D001, pale red = the stock is not there at all.
+# Matching the palette means the export needs no retouching before it is sent.
+_PO_FILL = PatternFill("solid", fgColor="FFFFFF00")
+_STO_FILL = PatternFill("solid", fgColor="FFFFC000")
+_SHORT_FILL = PatternFill("solid", fgColor="FFFFC7CE")
+_SHORT_FONT = Font(color="FF9C0006")
+
+
+def _tinted(
+    ws,
+    value,
+    fill: Optional[PatternFill] = None,
+    fmt: Optional[str] = None,
+    font: Optional[Font] = None,
+) -> WriteOnlyCell:
+    """A write-only cell that carries a colour, so the sheet reads at a glance."""
+    cell = WriteOnlyCell(ws, value=value)
+    if fill is not None:
+        cell.fill = fill
+    if fmt:
+        cell.number_format = fmt
+    if font is not None:
+        cell.font = font
+    return cell
 
 
 def _put_header(ws, headers: Sequence[str]) -> None:
@@ -834,6 +861,9 @@ def _put_header(ws, headers: Sequence[str]) -> None:
         cell = WriteOnlyCell(ws, value=text)
         cell.font = _HEAD_FONT
         cell.fill = _HEAD_FILL
+        # Headings such as 全期目標（10日 Target） are wider than any sensible
+        # column, so they wrap instead of being clipped.
+        cell.alignment = Alignment(wrap_text=True, vertical="center")
         cells.append(cell)
     ws.append(cells)
 
@@ -853,6 +883,38 @@ def _target_heads(params: dict) -> Tuple[str, str]:
         f"分配數量（{dispatch_days}日 Target）" if dispatch_days else "分配數量"
     )
     return full, window
+
+
+# Widths that fit the Chinese headings and the numbers under them. The default
+# 8.43 clips most of them, and this file is read by people, not by a parser.
+_DETAIL_WIDTHS = {
+    "A": 13, "B": 38, "C": 8, "D": 7, "E": 9, "F": 10, "G": 8, "H": 16,
+    "I": 16, "J": 9, "K": 7, "L": 7, "M": 7, "N": 7, "O": 8, "P": 10,
+    "Q": 12, "R": 8, "S": 8, "T": 9, "U": 9, "V": 9, "W": 22,
+}
+
+
+def _detail_layout(ws, last_row: int) -> None:
+    """Freeze the identifying columns, filter the header, size the columns.
+
+    A frozen header and auto-filter are what the shop-by-shop sheets are used
+    for: scroll to row 140 and you still know which column you are reading.
+    """
+    ws.freeze_panes = "D2"
+    ws.auto_filter.ref = f"A1:W{last_row}"
+    ws.row_dimensions[1].height = 45
+    for col, width in _DETAIL_WIDTHS.items():
+        ws.column_dimensions[col].width = width
+
+
+def _compare_layout(ws, last_row: int, n_cols: int) -> None:
+    ws.freeze_panes = "C2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last_row}"
+    ws.row_dimensions[1].height = 30
+    ws.column_dimensions["A"].width = 13
+    ws.column_dimensions["B"].width = 38
+    for idx in range(3, n_cols + 1):
+        ws.column_dimensions[get_column_letter(idx)].width = 9.5
 
 
 def export_run(
@@ -881,6 +943,10 @@ def export_run(
     # unlike 派貨目標 or 日銷 which are the same for A/B/C.
     for sc in scenarios:
         headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO（全期）", f"{sc} 缺貨"]
+    # Layout has to be set before the first row is written: a write-only sheet
+    # flushes its column widths and pane settings with the header row, so
+    # anything set afterwards is silently dropped.
+    _compare_layout(ws, 1 + len(compare_rows), len(headers))
     _put_header(ws, headers)
 
     for row in compare_rows:
@@ -901,15 +967,28 @@ def export_run(
             first.blocked_qty if first else 0,
             "是" if first and first.enough else "否",
         ]
+        po_cols: List[int] = []
+        short_cols: List[int] = []
         for sc in scenarios:
             s = row["scenarios"].get(sc)
+            # Remember where the two action columns land: the block repeats per
+            # scenario, so their positions move with the scenario count.
+            po_cols.append(len(line) + 2)
+            short_cols.append(len(line) + 3)
             line += [
                 s.need_qty if s else 0,
                 s.total_dispatch if s else 0,
                 s.po_qty if s else 0,
                 s.short_qty if s else 0,
             ]
-        ws.append(line)
+        cells = list(line)
+        for idx in po_cols:
+            if line[idx]:
+                cells[idx] = _tinted(ws, line[idx], _PO_FILL)
+        for idx in short_cols:
+            if line[idx]:
+                cells[idx] = _tinted(ws, line[idx], _SHORT_FILL, font=_SHORT_FONT)
+        ws.append(cells)
 
     # --- detail sheet per scenario ---
     desc_of = {r["sku"]: r.get("description", "") for r in compare_rows}
@@ -919,49 +998,62 @@ def export_run(
         if not res:
             continue
         ws2 = wb.create_sheet(f"明細_{sc}")
-        _put_header(
-            ws2,
-            [
-                "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "分配基準", "佔比",
-                full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
-                "需求", "可派 STO", "開 PO（全期）", "缺貨",
-                "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
-            ],
-        )
+        detail_heads = [
+            "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "分配基準", "佔比",
+            full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
+            "需求", "可派 STO", "開 PO（全期）", "缺貨",
+            "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
+        ]
+        # Before the header row, for the same reason as the comparison sheet.
+        _detail_layout(ws2, 1 + len(res.lines))
+        _put_header(ws2, detail_heads)
         moq_of = {s.sku: s.moq for s in res.skus}
+        # Positions of the three action columns in the row list below: 需求 (14)
+        # is where 分配量 lands, 可派 STO (15), 開 PO（全期）(16), 缺貨 (17).
+        _STO_COL, _PO_COL, _SHORT_COL = 15, 16, 17
         for ln in res.lines:
             reason = ""
             if ln.blocked:
                 reason = (
                     f"RP={ln.rp_type}" if ln.rp_type else "未提供 RP Type"
                 ) + f"（需求 {ln.need_qty}）"
-            ws2.append(
-                [
-                    ln.sku,
-                    desc_of.get(ln.sku, ""),
-                    ln.shop_code,
-                    "行貨" if ln.vendor else "倉貨",
-                    ln.supply_source,
-                    "全期" if ln.alloc_full_period else "派貨期",
-                    round(ln.share_pct, 6),
-                    ln.alloc_full_qty,
-                    ln.alloc_qty,
-                    ln.stock_qty,
-                    ln.pending_qty,
-                    ln.on_hand,
-                    ln.gap_qty,
-                    moq_of.get(ln.sku, 1),
-                    ln.need_qty,
-                    ln.sto_qty,
-                    ln.po_qty,
-                    ln.short_qty,
-                    round(ln.daily_rate, 2),
-                    ln.expected_sales,
-                    ln.surplus_qty,
-                    ln.rp_type,
-                    reason,
-                ]
-            )
+            values: List[Any] = [
+                ln.sku,
+                desc_of.get(ln.sku, ""),
+                ln.shop_code,
+                "行貨" if ln.vendor else "倉貨",
+                ln.supply_source,
+                "全期" if ln.alloc_full_period else "派貨期",
+                round(ln.share_pct, 6),
+                ln.alloc_full_qty,
+                ln.alloc_qty,
+                ln.stock_qty,
+                ln.pending_qty,
+                ln.on_hand,
+                ln.gap_qty,
+                moq_of.get(ln.sku, 1),
+                ln.need_qty,
+                ln.sto_qty,
+                ln.po_qty,
+                ln.short_qty,
+                round(ln.daily_rate, 2),
+                ln.expected_sales,
+                ln.surplus_qty,
+                ln.rp_type,
+                reason,
+            ]
+            # The three columns the warehouse acts on carry a colour, the same
+            # way the sheets are marked up by hand: yellow = raise a PO, orange
+            # = raise an STO from D001, pale red = the stock simply is not there.
+            if ln.sto_qty:
+                values[_STO_COL] = _tinted(ws2, ln.sto_qty, _STO_FILL)
+            if ln.po_qty:
+                values[_PO_COL] = _tinted(ws2, ln.po_qty, _PO_FILL)
+            if ln.short_qty:
+                values[_SHORT_COL] = _tinted(
+                    ws2, ln.short_qty, _SHORT_FILL, font=_SHORT_FONT
+                )
+            ws2.append(values)
 
     # --- parameters ---
     ws3 = wb.create_sheet("參數")
@@ -971,6 +1063,13 @@ def export_run(
     ws3.append(["執行者", run.get("created_by", "")])
     ws3.append(["SKU 數", run.get("n_sku", "")])
     ws3.append(["不夠貨 SKU 數", run.get("n_short", "")])
+    ws3.append(
+        [
+            "顏色",
+            "黃 = 需要開 PO（Buyer 落單）；橙 = 需要開 STO（RP 由 D001 出貨）；"
+            "淺紅 = 缺貨（倉存不足，要跟進）",
+        ]
+    )
     for note in params.get("shared_targets") or []:
         # The comparison sheet shows a shared target as one row; this is where
         # the per-SKU split behind that row can be checked.

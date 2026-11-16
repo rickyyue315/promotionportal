@@ -971,6 +971,101 @@ def test_vendor_po_covers_the_whole_promotion(client):
     wb2.close()
 
 
+def test_export_colours_what_has_to_be_raised(client):
+    """The three action columns are tinted, and the sheet is laid out to be read.
+
+    Ops already paints 開 PO yellow, 可派 STO orange and 缺貨 red by hand every
+    month; the export should hand that back ready to send, with the header
+    frozen and a filter so column 17 is still identifiable at row 150.
+    """
+    period = "2027-07"
+    sku = "111058305001"
+
+    db.upsert_shop("HB01", "HB01 倉貨店", "HK")
+    db.upsert_shop("HB02", "HB02 行貨店", "HK")
+    db.save_shares(period, "A", {"HB01": 0.5, "HB02": 0.5}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 400])
+    target = io.BytesIO()
+    wb.save(target)
+
+    # D001 holds 50 against a 200-piece warehouse demand: 50 goes out on an STO
+    # and 150 is short. The vendor shop covers the whole period with a PO.
+    stock = _sap_supply_bytes(
+        [
+            (sku, "面膜", "D001", "2", 50),
+            (sku, "面膜", "HB01", "2", 0),
+            (sku, "面膜", "HB02", "4", 0),
+        ]
+    )
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-07-05",
+            "promo_end": "2027-07-08",     # 4 days, all of them dispatched
+            "dispatch_days": "4",
+        },
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    from openpyxl import load_workbook
+
+    export = client.get(f"/run/{token}/export.xlsx")
+    wb2 = load_workbook(io.BytesIO(export.content))     # not read_only: styles
+    ws = wb2["明細_A"]
+
+    head = [c.value for c in ws[1]]
+    sto = head.index("可派 STO") + 1
+    po = head.index("開 PO（全期）") + 1
+    short = head.index("缺貨") + 1
+    rows = {ws.cell(row=r, column=3).value: r for r in range(2, ws.max_row + 1)}
+
+    # Warehouse shop: 50 on an STO, 150 short, nothing on a PO.
+    hb01 = rows["HB01"]
+    assert ws.cell(row=hb01, column=sto).value == 50
+    assert ws.cell(row=hb01, column=sto).fill.fgColor.rgb == "FFFFC000"
+    assert ws.cell(row=hb01, column=short).value == 150
+    assert ws.cell(row=hb01, column=short).fill.fgColor.rgb == "FFFFC7CE"
+    assert not ws.cell(row=hb01, column=po).value
+    assert ws.cell(row=hb01, column=po).fill.fill_type is None
+
+    # Vendor shop: 200 on a PO, and no STO colour bleeding into that column.
+    hb02 = rows["HB02"]
+    assert ws.cell(row=hb02, column=po).value == 200
+    assert ws.cell(row=hb02, column=po).fill.fgColor.rgb == "FFFFFF00"
+    assert not ws.cell(row=hb02, column=sto).value
+    assert ws.cell(row=hb02, column=sto).fill.fill_type is None
+
+    # Layout: the identifying columns stay put, the header wraps, and the
+    # filter covers exactly the rows that exist.
+    assert ws.freeze_panes == "D2"
+    assert ws.auto_filter.ref == f"A1:W{1 + len(rows)}"
+    assert ws.row_dimensions[1].height >= 40
+    assert ws["A1"].alignment.wrap_text is True
+    assert ws.column_dimensions["B"].width >= 30
+
+    compare = wb2["比較"]
+    chead = [c.value for c in compare[1]]
+    cpo = chead.index("A 開 PO（全期）") + 1
+    assert compare.cell(row=2, column=cpo).fill.fgColor.rgb == "FFFFFF00"
+    assert compare.freeze_panes == "C2"
+    wb2.close()
+
+
 def test_supply_source_column_missing_is_reported(client):
     """No column: every shop is 倉貨 and the page says so, rather than assuming."""
     period = "2027-05"
