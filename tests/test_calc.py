@@ -22,6 +22,7 @@ from app.calc import (
     round_up_to,
     sales_window_start,
     sku_moq,
+    split_shared_targets,
 )
 
 
@@ -578,3 +579,111 @@ class TestDispatchBatches:
     def test_empty_window_has_no_batches(self):
         w = PromoWindow(start=date(2026, 11, 18), end=date(2026, 11, 16), dispatch_days=4)
         assert dispatch_batches(w) == []
+
+
+class TestSharedTarget:
+    """One 4,000 written over two SKUs, as the target file often does."""
+
+    A = "111058302001"
+    B = "111058302002"
+
+    def targets(self):
+        return [SkuTarget(self.A, 4000, group=self.A), SkuTarget(self.B, 0, group=self.A)]
+
+    def sales(self):
+        return {
+            self.A: {"S1": ShopSales(last_month_sold=800, mtd_sold=200)},
+            self.B: {"S1": ShopSales(last_month_sold=200, mtd_sold=50)},
+        }
+
+    def test_split_uses_the_sales_mix(self):
+        out, notes = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        assert [t.target_qty for t in out] == [3200, 800]
+        assert sum(t.target_qty for t in out) == 4000
+        assert "銷量比例" in notes[0]
+        assert self.A in notes[0] and self.B in notes[0]
+
+    def test_split_falls_back_to_stock_when_there_is_no_sales_data(self):
+        out, notes = split_shared_targets(
+            self.targets(), stock_by_sku={self.A: {"S1": 5000}, self.B: {"S1": 1000}}
+        )
+        assert [t.target_qty for t in out] == [3333, 667]
+        assert "庫存" in notes[0]
+
+    def test_split_falls_back_to_even_when_there_is_nothing_to_go_on(self):
+        out, notes = split_shared_targets(self.targets())
+        assert [t.target_qty for t in out] == [2000, 2000]
+        assert "平均" in notes[0]
+
+    def test_a_standalone_target_is_left_alone(self):
+        out, notes = split_shared_targets([SkuTarget("X", 10)])
+        assert out[0].target_qty == 10 and out[0].group == ""
+        assert notes == []
+
+    def test_group_stock_covers_every_member(self):
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A",
+            ["S1"],
+            [1.0],
+            targets,
+            {self.A: {"S1": 5000}, self.B: {"S1": 1000}},
+        )
+        assert all(s.enough for s in res.skus)
+        assert res.n_short == 0
+        assert sum(s.shortfall_qty for s in res.skus) == 0
+
+    def test_group_shortfall_is_reported_once(self):
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets, {self.A: {"S1": 300}, self.B: {"S1": 100}}
+        )
+        assert res.n_short == 1
+        assert sum(s.shortfall_qty for s in res.skus) == 3600
+        assert next(s for s in res.skus if s.sku == self.A).shortfall_qty == 3600
+
+    def test_dispatch_is_capped_by_what_the_group_lacks(self):
+        # The shop holds 3,500 of the 7PC and none of the 14PC. The 14PC's own
+        # share is short, but the group only lacks 500 — sending 800 would
+        # duplicate what the 7PC already covers.
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets, {self.A: {"S1": 3500}, self.B: {}}
+        )
+        assert sum(line.dispatch_qty for line in res.lines) == 500
+        assert sum(s.need_qty for s in res.skus) == 500
+
+    def test_a_covered_group_asks_for_nothing_even_when_one_pack_is_missing(self):
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets, {self.A: {"S1": 4000}, self.B: {}}
+        )
+        assert sum(line.dispatch_qty for line in res.lines) == 0
+        assert all(line.short_qty == 0 for line in res.lines)
+
+    def test_compare_shows_one_row_for_the_group(self):
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets, {self.A: {"S1": 3500}, self.B: {}}
+        )
+        rows = compare_scenarios({"A": res})
+        assert len(rows) == 1
+        row = rows[0]
+        assert row["group_size"] == 2
+        assert row["target_qty"] == 4000
+        assert row["total_stock"] == 3500
+        assert row["sku"] == f"{self.A} + {self.B}"
+
+    def test_members_keep_their_own_moq_when_the_group_is_capped(self):
+        targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
+        res = compute_scenario(
+            "A",
+            ["S1"],
+            [1.0],
+            targets,
+            {self.A: {"S1": 3500}, self.B: {}},
+            moq_by_sku={self.B: 6},
+        )
+        dispatched = sum(line.dispatch_qty for line in res.lines)
+        assert dispatched % 6 == 0
+        assert dispatched >= 500

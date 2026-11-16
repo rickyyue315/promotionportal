@@ -178,6 +178,21 @@ class StockRow:
     moq: int = 1
 
 
+@dataclass(frozen=True)
+class TargetRow:
+    """One SKU line of the target file.
+
+    ``qty`` is 0 for the members of a shared target: only the row that carries
+    the number in the spreadsheet has it, and ``group`` names that row's SKU.
+    Standalone SKUs leave ``group`` empty.
+    """
+
+    sku: str
+    description: str
+    qty: int
+    group: str = ""
+
+
 @dataclass
 class Parsed:
     rows: List[Any] = field(default_factory=list)
@@ -254,6 +269,8 @@ def parse_target_file(
     duplicates: List[str] = []
     bad_rows: List[str] = []
     fractional: List[str] = []
+    shared: List[str] = []
+    group_key = ""
 
     for offset, row in enumerate(body, start=h + 2):
         if not any(c not in (None, "") for c in row):
@@ -265,8 +282,26 @@ def parse_target_file(
         if re.fullmatch(r"\d+\.0", sku):
             sku = sku[:-2]
 
-        qty = to_number(row[i_target]) if i_target < len(row) else None
+        desc = ""
+        if i_desc is not None and i_desc < len(row) and row[i_desc] is not None:
+            desc = str(row[i_desc]).strip()
+
+        raw_qty = row[i_target] if i_target < len(row) else None
+        qty = to_number(raw_qty)
         if qty is None:
+            # A blank under a filled cell is how one target is written for a
+            # block of SKUs: merged across the rows, or simply left empty once.
+            # Both mean "same target as above", never "no target" — a row with
+            # no quantity at all cannot be allocated, so it would otherwise be
+            # dropped and its stock silently ignored.
+            if group_key and not str(raw_qty or "").strip():
+                if sku in seen:
+                    duplicates.append(sku)
+                    continue
+                seen[sku] = 1
+                shared.append(sku)
+                out.rows.append(TargetRow(sku, desc, 0, group=group_key))
+                continue
             bad_rows.append(f"第 {offset} 行（{sku}）：Target 不是數字")
             continue
         if qty < 0:
@@ -276,15 +311,29 @@ def parse_target_file(
             fractional.append(sku)
         qty_i = int(round(qty))
 
-        desc = ""
-        if i_desc is not None and i_desc < len(row) and row[i_desc] is not None:
-            desc = str(row[i_desc]).strip()
-
         if sku in seen:
             duplicates.append(sku)
             continue
         seen[sku] = 1
-        out.rows.append((sku, desc, qty_i))
+        group_key = sku
+        out.rows.append(TargetRow(sku, desc, qty_i))
+
+    # The first row of a block gains its group only once a follower proves it
+    # has one, so parse in order and fix the owner up at the end.
+    members = {row.group for row in out.rows if row.group}
+    out.rows = [
+        TargetRow(r.sku, r.description, r.qty, r.group or (r.sku if r.sku in members else ""))
+        for r in out.rows
+    ]
+
+    if shared:
+        out.warnings.append(
+            f"有 {len(shared)} 個 SKU 的 Target 空白（合併儲存格或留空），"
+            "已當作與上一行共用同一個 Target："
+            + "、".join(shared[:8])
+            + ("…" if len(shared) > 8 else "")
+            + "。如屬漏填，請在 Excel 補上數值。"
+        )
 
     if duplicates:
         out.errors.append(
@@ -766,6 +815,10 @@ def export_run(
     ws3.append(["執行者", run.get("created_by", "")])
     ws3.append(["SKU 數", run.get("n_sku", "")])
     ws3.append(["不夠貨 SKU 數", run.get("n_short", "")])
+    for note in params.get("shared_targets") or []:
+        # The comparison sheet shows a shared target as one row; this is where
+        # the per-SKU split behind that row can be checked.
+        ws3.append(["共用 Target", note])
     if params.get("promo_start"):
         ws3.append(["推廣開始", params.get("promo_start", "")])
         ws3.append(["推廣完結", params.get("promo_end", "")])
@@ -860,6 +913,13 @@ def export_target_template() -> bytes:
     note = wb.create_sheet("說明")
     note.append(["SKU", "必填，不可重複"])
     note.append(["Target Qty", "必填，整數"])
+    note.append(
+        [
+            "共用 Target",
+            "同一貨品的多個包裝可只填第一行（其餘留空或合併儲存格），"
+            "系統當一個貨組，按銷量比例拆回各 SKU",
+        ]
+    )
     note.append(["MOQ", "不在這個檔：MOQ 由店舖庫存檔的 MOQ 欄提供，留空即不進位"])
     return _save(wb)
 

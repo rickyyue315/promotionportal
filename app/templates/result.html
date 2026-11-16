@@ -148,6 +148,24 @@
 </section>
 {% endif %}
 
+{% if params.shared_targets %}
+<section class="card">
+  <header>
+    <h2>共用 Target 貨組</h2>
+    <span class="hint">{{ params.shared_targets | length }} 組</span>
+  </header>
+  <div class="body" style="font-size:13px">
+    {% for note in params.shared_targets %}
+    <div style="padding:6px 0;border-bottom:1px solid #f4f4f0">{{ note }}</div>
+    {% endfor %}
+    <p class="dim" style="font-size:12.5px;margin:10px 0 0">
+      同一貨組共用一個 Target：夠貨按整組存貨判斷，各店需求先以組的缺口封頂，再按上列比例拆回各 SKU。
+      比較表以一行顯示整組，明細頁仍可逐個 SKU 查看。
+    </p>
+  </div>
+</section>
+{% endif %}
+
 <section class="card">
   <header>
     <h2>A／B／C 比較</h2>
@@ -190,7 +208,7 @@
           {% set s0 = (row.scenarios.values() | list | first) %}
           <tr class="{{ 'is-short' if short }}" data-short="{{ 1 if short else 0 }}"
               data-search="{{ (row.sku ~ ' ' ~ row.description) | lower }}">
-            <td class="mono">{{ row.sku }}</td>
+            <td class="mono">{{ row.sku }}{% if row.group_size %}<span class="badge neutral" style="margin-left:6px">貨組 {{ row.group_size }}</span>{% endif %}</td>
             <td class="dim">{{ row.description or '—' }}</td>
             <td class="num">{{ row.target_qty | num }}</td>
             <td class="num">{{ s0.dispatch_target | num if s0 else '—' }}</td>
@@ -227,6 +245,9 @@
     「派貨目標」是 Target 按派貨日數縮小後的數量；「日銷」＝（上月銷量＋本月銷量）÷ 有紀錄日數，新產品由 Launch Date 起計。
     「目標差距」＝ Target − 推廣期預計銷量，正數代表按現時銷量做不到 Target。
     「夠貨」＝ 店舖庫存 ＋ 在途 ＋ 倉存 是否足以覆蓋整個 Target；「缺貨」是倉存應付不來的需求，已按需求比例分配到各店。
+    {% if params.shared_targets %}
+    <br>「貨組」是共用同一個 Target 的 SKU：Target 與存貨以整組合計，所以 5,000 + 1,000 對 4,000 是夠貨。
+    {% endif %}
     {% if gate %}
     <br>RP Type 規則：{{ gate | join('、') }} 只有 RP Type = RF 才派貨，ND 或未提供一律 0 件，因此實際派貨量會較低。
     {% endif %}

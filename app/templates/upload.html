@@ -83,6 +83,7 @@
           </label>
           <p class="dim" style="font-size:12.5px;margin:0">
             只要 SKU 與 Target Qty 兩欄，不需要 MOQ（MOQ 由庫存檔提供）。
+            同一貨品的多個包裝可只填第一行、其餘留空或合併儲存格，系統當一個貨組按銷量比例拆。
             <a href="/run/template/target">下載範本</a>
           </p>
         </div>
@@ -144,9 +145,9 @@
   <section class="card">
     <header><h2>計算邏輯</h2></header>
     <div class="body" style="font-size:13px;color:var(--text-2)">
-      <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。</p>
+      <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。共用 Target 的貨組是先拆回各 SKU 才縮小。</p>
       <p style="margin:0 0 10px"><strong>2. 拆到店舖</strong>　按該餐的店舖佔比分配派貨目標，用最大餘數法確保加起來剛好等於派貨目標。</p>
-      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按庫存檔的 MOQ 向上取至倍數（沒有 MOQ 欄就不進位）。</p>
+      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按庫存檔的 MOQ 向上取至倍數（沒有 MOQ 欄就不進位）。共用 Target 的貨組會先以組的缺口封頂，避免兩個包裝各派一次。</p>
       {% if rp_gate_shops %}
       <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
       {% endif %}

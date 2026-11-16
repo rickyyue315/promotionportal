@@ -133,6 +133,74 @@ def _hb87_demo(client: TestClient) -> str:
     return resp.headers["location"].rstrip("/").split("/")[-1]
 
 
+def _shared_demo(client: TestClient) -> str:
+    """Two pack sizes sharing one target, the way the real target file writes it."""
+    from openpyxl import Workbook
+
+    period = "2027-01"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shares"
+    ws.append(["Shop", "店舖名稱", "A"])
+    ws.append(["HA01", "HA01 門市", 0.5])
+    ws.append(["HA02", "HA02 門市", 0.3])
+    ws.append(["HA03", "HA03 門市", 0.2])
+    buf = io.BytesIO()
+    wb.save(buf)
+    client.post(
+        "/admin/shares/import",
+        data={"period": period},
+        files={"file": ("shares.xlsx", buf.getvalue())},
+        follow_redirects=False,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "HYDRA-AZ FACE MASK, N/A, 7PC", 4000])
+    ws.append(["111058302002", "HYDRA-AZ FACE MASK, N/A, 14PC", None])
+    ws.merge_cells("C2:C3")
+    tbuf = io.BytesIO()
+    wb.save(tbuf)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        ["Article", "Site", "SaSa Net Stock",
+         "Last Month Sold Qty", "MTD Sold Qty", "MOQ"]
+    )
+    rows = [
+        ("111058302001", "HA01", 1800, 800, 200, 6),
+        ("111058302001", "HA02", 1000, 480, 120, 6),
+        ("111058302001", "HA03", 600, 240, 60, 6),
+        ("111058302001", "D001", 500, 0, 0, 6),
+        ("111058302002", "HA01", 300, 200, 50, 6),
+        ("111058302002", "HA02", 200, 120, 30, 6),
+        ("111058302002", "HA03", 0, 40, 10, 6),
+    ]
+    for sku, site, stock, last, mtd, moq in rows:
+        ws.append([sku, site, stock, last, mtd, moq])
+    sbuf = io.BytesIO()
+    wb.save(sbuf)
+
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-01-05",
+            "promo_end": "2027-01-08",
+            "dispatch_days": "4",
+        },
+        files={
+            "target_file": ("target.xlsx", tbuf.getvalue()),
+            "stock_file": ("stock.xlsx", sbuf.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    return resp.headers["location"].rstrip("/").split("/")[-1]
+
+
 def main() -> None:
     samples = ROOT / "samples"
     with TestClient(app) as c:
@@ -176,6 +244,16 @@ def main() -> None:
         shoot(c, "/admin/settings", "10_settings", 1100)
         shoot(c, f"/run/{hb_run}", "11_result_hb87", 1400)
         shoot(c, f"/run/{hb_run}/detail?scenario=A&sku=111058302001", "12_detail_hb87", 1500)
+
+        # A merged target cell: two pack sizes on one quantity.
+        shared_run = _shared_demo(c)
+        shoot(c, f"/run/{shared_run}", "13_result_shared", 1500)
+        shoot(
+            c,
+            f"/run/{shared_run}/detail?scenario=A&sku=111058302002",
+            "14_detail_shared",
+            1300,
+        )
 
     # login page has no session
     with TestClient(app) as c:

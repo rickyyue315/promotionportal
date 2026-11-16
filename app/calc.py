@@ -63,12 +63,34 @@ sum of shop needs exceeds it, the available units are shared in proportion to
 need (largest remainder, whole MOQ steps) and the remainder is reported as
 shortage. Pending receipts at D001 are *not* counted: they are inbound to the
 warehouse and may never arrive within the promotion.
+
+Shared target (貨組)
+--------------------
+A target file often gives one quantity to several SKUs — two pack sizes of the
+same product, written as 4000 on the first row and a blank or merged cell
+underneath. Those SKUs form a *group*: the 4000 belongs to the group, not to any
+one member.
+
+The group is the unit the buyer reviews, so the group is the unit that must
+answer "夠貨". Judging members one at a time would report a shortage for the
+pack that happens to be scarce even though the group as a whole is covered.
+
+How it is calculated:
+
+    split      = group target apportioned by sales mix (fallback: stock, equal)
+    group_need = max(Σ alloc - Σ (stock + pending), 0)   per shop
+    dispatch   = members' own needs, capped so they sum to group_need
+    covered    = Σ (stock + pending + warehouse) over members ≥ group target
+
+The split only decides how the group target is *reported* per member; the
+per-shop cap is what keeps the dispatch honest. Without it, two members that
+each look short in a shop would both receive stock for the same missing units.
 """
 
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
 from typing import Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -80,9 +102,17 @@ RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
 
 @dataclass(frozen=True)
 class SkuTarget:
+    """One SKU's target, and — when several SKUs share one quantity — its group.
+
+    ``group`` is the SKU that owns the number in the spreadsheet (the first row
+    of the block); every member carries the same key, including the owner, so a
+    group is always found by ``target.group``. Standalone SKUs leave it empty.
+    """
+
     sku: str
     target_qty: int
     description: str = ""
+    group: str = ""
 
 
 @dataclass(frozen=True)
@@ -170,10 +200,20 @@ class SkuSummary:
     short_qty: int = 0
     blocked_qty: int = 0
     gap_supply: int = 0
+    group: str = ""
 
     @property
     def enough(self) -> bool:
         return self.coverage_status == COVERAGE_SUFFICIENT
+
+    @property
+    def is_group_lead(self) -> bool:
+        """True for the SKU that carries the shared target (and its shortfall).
+
+        A group's deficit is reported once — on the row that owns the number —
+        so summing shortfall across SKUs never counts the same units twice.
+        """
+        return bool(self.group) and self.group == self.sku
 
 
 @dataclass
@@ -190,7 +230,14 @@ class ScenarioResult:
 
     @property
     def n_short(self) -> int:
-        return sum(1 for s in self.skus if s.coverage_status == COVERAGE_SHORT)
+        """How many targets are not covered — a shared target counts once."""
+        return len(
+            {
+                s.group or s.sku
+                for s in self.skus
+                if s.coverage_status == COVERAGE_SHORT
+            }
+        )
 
     @property
     def total_target(self) -> int:
@@ -294,6 +341,92 @@ def sku_moq(moq_by_sku: Optional[Dict[str, int]], sku: str) -> int:
 
 
 # ---------------------------------------------------------------------------
+# shared targets
+# ---------------------------------------------------------------------------
+
+
+def split_shared_targets(
+    targets: Iterable[SkuTarget],
+    sales_by_sku: Optional[Dict[str, Dict[str, ShopSales]]] = None,
+    stock_by_sku: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Tuple[List[SkuTarget], List[str]]:
+    """Turn one shared quantity into a target per member SKU.
+
+    The spreadsheet says "4000 for this block"; the report has to say how much
+    of that belongs to the 7PC and how much to the 14PC. Sales mix decides,
+    because that is what the shops actually sell; when the stock file carries no
+    sales columns the split falls back to what is on hand, and then to an even
+    split. Whichever basis is used is reported back, never applied silently.
+
+    The returned notes are shown on the result page and written to the export,
+    so the split can be checked without opening the source files again.
+    """
+    items = list(targets)
+    groups: Dict[str, List[int]] = {}
+    for index, item in enumerate(items):
+        if item.group:
+            groups.setdefault(item.group, []).append(index)
+
+    out = list(items)
+    notes: List[str] = []
+
+    for key, indexes in groups.items():
+        if len(indexes) < 2:
+            continue
+        members = [items[i] for i in indexes]
+        total = max(members[0].target_qty, 0)
+        if total <= 0:
+            continue
+
+        weights, basis, caveat = _group_weights([m.sku for m in members], sales_by_sku, stock_by_sku)
+        parts = apportion(total, weights)
+
+        for index, part in zip(indexes, parts):
+            member = items[index]
+            out[index] = replace(member, target_qty=part, group=key)
+
+        notes.append(
+            " + ".join(m.sku for m in members)
+            + f"：共用 {total:,} 件，按{basis}拆為 "
+            + "／".join(f"{p:,}" for p in parts)
+            + (f"（{caveat}）" if caveat else "")
+        )
+
+    return out, notes
+
+
+def _group_weights(
+    skus: Sequence[str],
+    sales_by_sku: Optional[Dict[str, Dict[str, ShopSales]]],
+    stock_by_sku: Optional[Dict[str, Dict[str, float]]],
+) -> Tuple[List[float], str, str]:
+    """Relative share of the group target per SKU, plus how it was decided."""
+    sales = []
+    for sku in skus:
+        per_shop = (sales_by_sku or {}).get(sku) or {}
+        sales.append(
+            float(
+                sum(
+                    max(s.last_month_sold, 0) + max(s.mtd_sold, 0)
+                    for s in per_shop.values()
+                )
+            )
+        )
+    if sum(sales) > 0:
+        return [s / sum(sales) for s in sales], "銷量比例", ""
+
+    stock = [
+        float(sum(((stock_by_sku or {}).get(sku) or {}).values()))
+        for sku in skus
+    ]
+    if sum(stock) > 0:
+        return [s / sum(stock) for s in stock], "現有庫存比例", "庫存檔沒有銷量數據"
+
+    even = [1.0 / len(skus)] * len(skus)
+    return even, "平均", "沒有銷量與庫存數據"
+
+
+# ---------------------------------------------------------------------------
 # sales rate
 # ---------------------------------------------------------------------------
 
@@ -388,6 +521,86 @@ def cap_to_available(
     return [o * step for o in out]
 
 
+def _cap_group_needs(prepared: Sequence[dict], n_shops: int) -> None:
+    """Cap a group's per-shop needs at what the group as a whole is missing.
+
+    Each member computes its need against its own share of the shared target,
+    but the other members' stock sits in the same shop and sells against the
+    same target. Handing both members their own gap would send the missing
+    units twice; what the shop really lacks is ``Σ alloc − Σ on hand``.
+    """
+    groups: Dict[str, List[dict]] = {}
+    for item in prepared:
+        key = item["target"].group
+        if key:
+            groups.setdefault(key, []).append(item)
+
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        for index in range(n_shops):
+            alloc = sum(item["rows"][index]["alloc"] for item in items)
+            on_hand = sum(
+                item["rows"][index]["stock"] + item["rows"][index]["pending"]
+                for item in items
+            )
+            need = max(alloc - on_hand, 0)
+            wants = [item["candidates"][index] for item in items]
+            if sum(wants) <= need:
+                continue
+            for item, qty in zip(items, cap_to_available(wants, need, 1)):
+                item["candidates"][index] = qty
+                row = item["rows"][index]
+                # The need is what the warehouse has to send, so it follows the
+                # cap. Leaving it at the member's own gap would report a
+                # shortage for units the group already has in that shop.
+                # A blocked row keeps its need: nothing was sent, but for a
+                # reason the report shows separately.
+                if not row["blocked"]:
+                    row["need"] = qty
+
+
+def _apply_group_coverage(
+    skus: Sequence[SkuSummary], targets: Sequence[SkuTarget]
+) -> List[SkuSummary]:
+    """Give every member the group's verdict, and report its gap once.
+
+    A shop can only receive the group's target once, so the shortfall belongs to
+    the group. It is written on the row that owns the number in the source file
+    (``group == sku``) and left at zero on the other members, which keeps
+    per-SKU sums — totals, the usage log — from counting it twice.
+    """
+    groups: Dict[str, List[SkuTarget]] = {}
+    for target in targets:
+        if target.group:
+            groups.setdefault(target.group, []).append(target)
+    if not groups:
+        return list(skus)
+
+    by_sku = {s.sku: s for s in skus}
+    position = {s.sku: i for i, s in enumerate(skus)}
+    out = list(skus)
+
+    for key, members in groups.items():
+        if len(members) < 2:
+            continue
+        rows = [by_sku[m.sku] for m in members if m.sku in by_sku]
+        if len(rows) < 2:
+            continue
+        target_qty = sum(m.target_qty for m in members)
+        covered = sum(r.total_stock + r.total_pending + r.warehouse_qty for r in rows)
+        gap = max(target_qty - covered, 0)
+        status = COVERAGE_SUFFICIENT if gap == 0 else COVERAGE_SHORT
+        lead = next((r.sku for r in rows if r.sku == key), rows[0].sku)
+        for row in rows:
+            out[position[row.sku]] = replace(
+                row,
+                coverage_status=status,
+                shortfall_qty=gap if row.sku == lead else 0,
+            )
+    return out
+
+
 def compute_scenario(
     scenario: str,
     shops: Sequence[str],
@@ -420,6 +633,7 @@ def compute_scenario(
     warn = list(warnings or [])
     lines: List[Line] = []
     skus: List[SkuSummary] = []
+    targets = list(targets)
 
     gate = {str(s).strip().upper() for s in rp_gate_shops if str(s).strip()}
     rp_map = rp_by_sku or {}
@@ -451,6 +665,7 @@ def compute_scenario(
             + ("…" if len(unknown_stock) > 8 else "")
         )
 
+    prepared: List[dict] = []
     for target in targets:
         per_shop_stock = stock_by_sku.get(target.sku, {})
         per_shop_rp = rp_map.get(target.sku, {})
@@ -508,11 +723,38 @@ def compute_scenario(
                 }
             )
 
-        candidates = [0 if r["blocked"] else r["need"] for r in rows]
+        prepared.append(
+            {
+                "target": target,
+                "rows": rows,
+                "allocs": allocs,
+                "dispatch_target": dispatch_target,
+                "moq": moq,
+                "available": available,
+                "candidates": [0 if r["blocked"] else r["need"] for r in rows],
+            }
+        )
+
+    # A shared target is filled from the group's own stock, so the members'
+    # needs overlap; see _cap_group_needs.
+    _cap_group_needs(prepared, len(shops))
+
+    for item in prepared:
+        target = item["target"]
+        rows = item["rows"]
+        allocs = item["allocs"]
+        dispatch_target = item["dispatch_target"]
+        moq = item["moq"]
+        available = item["available"]
+        candidates = item["candidates"]
+
         if available is not None and sum(candidates) > available:
             capped = cap_to_available(candidates, available, moq)
         else:
             capped = candidates
+        # A group cap hands out single units rather than MOQ steps, so what is
+        # left gets rounded once here. For a standalone SKU this is a no-op.
+        capped = [round_up_to(qty, moq) for qty in capped]
 
         total_stock = 0
         total_pending = 0
@@ -525,6 +767,11 @@ def compute_scenario(
         needing = 0
 
         for row, dispatch in zip(rows, capped):
+            # Rounding up to the MOQ can ask for a few units more than the gap.
+            # Report the ask, not the gap, or the detail sheet would show a
+            # dispatch larger than the need it answers.
+            if dispatch > row["need"] and not row["blocked"]:
+                row["need"] = dispatch
             # A shop with no share, no stock, nothing in transit and no sales is
             # pure noise in the detail sheet — every column would be zero.
             # Keep the row when sales exist, because those units are real.
@@ -555,7 +802,9 @@ def compute_scenario(
                 short = 0
             else:
                 total_need += row["need"]
-                short = row["need"] - dispatch
+                # Rounding a capped quantity up to the MOQ can land a few units
+                # above the need; that is an over-send, never a shortage.
+                short = max(row["need"] - dispatch, 0)
                 if short > 0:
                     short_skus.add(target.sku)
                     short_units += short
@@ -609,11 +858,17 @@ def compute_scenario(
                     target.target_qty - total_expected if sales_known else 0
                 ),
                 need_qty=total_need,
-                short_qty=total_need - total_dispatch,
+                short_qty=max(total_need - total_dispatch, 0),
                 blocked_qty=total_blocked,
                 gap_supply=target.target_qty - (total_stock + total_pending + total_dispatch),
+                group=target.group,
             )
         )
+
+    # Judged per SKU, a shared target would report a shortage for whichever
+    # pack happens to be scarce on its own. The group is what was planned, so
+    # the group is what answers 夠貨.
+    skus = _apply_group_coverage(skus, targets)
 
     if blocked_skus:
         warn.append(
@@ -680,28 +935,76 @@ def compute_all_scenarios(
     return out
 
 
+_GROUP_SUM_FIELDS = (
+    "target_qty", "total_alloc", "total_stock", "total_dispatch", "surplus_qty",
+    "shortfall_qty", "n_shops_needing", "dispatch_target", "total_pending",
+    "warehouse_qty", "warehouse_pending", "expected_sales", "gap_target",
+    "need_qty", "short_qty", "blocked_qty", "gap_supply",
+)
+
+
+def _merge_group(members: Sequence[SkuSummary]) -> SkuSummary:
+    """One summary for a shared target, so the table reads 4,000 — not 3,200.
+
+    The members' rows are what the dispatch needs; the buyer's question is about
+    the group. Adding the numbers back up is the only honest way to show both.
+    """
+    if len(members) == 1:
+        return members[0]
+    first = members[0]
+    values = {
+        name: sum(getattr(member, name) for member in members)
+        for name in _GROUP_SUM_FIELDS
+    }
+    label = " + ".join(member.sku for member in members[:2])
+    if len(members) > 2:
+        label += f" 等 {len(members)} 個"
+    return SkuSummary(
+        sku=label,
+        description=first.description,
+        moq=max(member.moq for member in members),
+        daily_rate=round(sum(member.daily_rate for member in members), 4),
+        coverage_status=first.coverage_status,
+        group=first.group,
+        **values,
+    )
+
+
 def compare_scenarios(results: Dict[str, ScenarioResult]) -> List[dict]:
-    """Rows for the A/B/C comparison table: one row per SKU."""
+    """Rows for the A/B/C comparison table: one per target, groups included."""
     names = sorted(results)
     if not names:
         return []
 
-    by_sku: Dict[str, dict] = {}
-    for name in names:
-        for s in results[name].skus:
-            row = by_sku.setdefault(
-                s.sku,
-                {
-                    "sku": s.sku,
-                    "description": s.description,
-                    "target_qty": s.target_qty,
-                    "total_stock": s.total_stock,
-                    "shortfall_qty": s.shortfall_qty,
-                    "scenarios": {},
-                },
-            )
-            row["scenarios"][name] = s
+    rows: Dict[str, dict] = {}
+    order: List[str] = []
 
-    rows = list(by_sku.values())
-    rows.sort(key=lambda r: (-r["shortfall_qty"], r["sku"]))
-    return rows
+    for name in names:
+        grouped: Dict[str, List[SkuSummary]] = {}
+        for summary in results[name].skus:
+            key = summary.group or summary.sku
+            if key not in grouped:
+                grouped[key] = []
+                if key not in rows:
+                    order.append(key)
+            grouped[key].append(summary)
+
+        for key, members in grouped.items():
+            merged = _merge_group(members)
+            row = rows.get(key)
+            if row is None:
+                row = {
+                    "sku": merged.sku,
+                    "description": merged.description,
+                    "target_qty": merged.target_qty,
+                    "total_stock": merged.total_stock,
+                    "shortfall_qty": merged.shortfall_qty,
+                    "group_size": len(members) if len(members) > 1 else 0,
+                    "scenarios": {},
+                }
+                rows[key] = row
+            row["scenarios"][name] = merged
+
+    out = [rows[key] for key in order]
+    out.sort(key=lambda r: (-r["shortfall_qty"], r["sku"]))
+    return out

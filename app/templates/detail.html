@@ -36,6 +36,7 @@
         {% for s in skus %}
         <option value="{{ s.sku }}" {{ 'selected' if s.sku == sku }}>
           {{ s.sku }}{% if s.description %} · {{ s.description }}{% endif %}
+          {% if s.group %}（貨組 {{ s.group }}）{% endif %}
           {% if s.shortfall_qty %}（Target 欠 {{ s.shortfall_qty }}）{% endif %}
         </option>
         {% endfor %}
@@ -50,7 +51,7 @@
   <div class="body flush">
     {% if sku and selected %}
       <div class="statbar">
-        <div><div class="k">Target</div><div class="v">{{ selected.target_qty | num }}</div></div>
+        <div><div class="k">Target{% if selected.group %}（貨組 {{ selected.group }}）{% endif %}</div><div class="v">{{ selected.target_qty | num }}</div></div>
         <div><div class="k">派貨目標</div><div class="v">{{ selected.dispatch_target | num }}</div></div>
         <div><div class="k">店舖庫存</div><div class="v">{{ selected.total_stock | num }}</div></div>
         <div><div class="k">在途</div><div class="v">{{ selected.total_pending | num }}</div></div>
@@ -130,6 +131,11 @@
       </div>
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
         「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；「可派」受 D001 倉存限制，不足時按需求比例分配。
+        {% if selected.group %}
+        <br>這個 SKU 屬共用 Target 貨組 <strong>{{ selected.group }}</strong>，上面的 Target 是它在組內分到的份額；
+        每店需求會與組內其他 SKU 一併封頂，兩邊不會就同一批缺貨各派一次。
+        所以「差距」大於 0 但「需求」是 0，代表那個缺口已由組內另一個包裝在該店的存貨抵銷。
+        {% endif %}
         {% if gate %}{{ gate | join('、') }} 只有 RP Type = RF 才會派貨，ND 或未提供一律 0 件。{% endif %}
       </div>
     {% elif by_shop %}

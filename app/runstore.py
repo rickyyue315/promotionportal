@@ -46,9 +46,10 @@ class Run:
 
     @property
     def n_short(self) -> int:
+        """Targets not covered; a shared target is one target, not one per SKU."""
         return len(
             {
-                s.sku
+                s.group or s.sku
                 for res in self.results.values()
                 for s in res.skus
                 if s.coverage_status == calc.COVERAGE_SHORT

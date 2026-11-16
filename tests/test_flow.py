@@ -635,3 +635,91 @@ def test_user_role_cannot_open_admin(client):
 
     resp = client.get("/run/new")
     assert resp.status_code == 200
+
+
+def test_merged_target_cell_is_read_as_a_shared_target():
+    """C2:C3 merged is how one quantity is written for two SKUs."""
+    from openpyxl import Workbook
+
+    from app import excel_io
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "HYDRA 7PC", 4000])
+    ws.append(["111058302002", "HYDRA 14PC", None])
+    ws.merge_cells("C2:C3")
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    parsed = excel_io.parse_target_file(buf.getvalue())
+    assert parsed.ok, parsed.errors
+    assert [row.sku for row in parsed.rows] == ["111058302001", "111058302002"]
+    assert parsed.rows[0].qty == 4000
+    assert parsed.rows[1].qty == 0
+    assert parsed.rows[0].group == parsed.rows[1].group == "111058302001"
+    assert any("共用同一個 Target" in w for w in parsed.warnings)
+
+
+def test_shared_target_flows_through_to_the_result(client):
+    from openpyxl import Workbook, load_workbook
+
+    login(client, "adminpw", "Ricky")
+    shops = [s["code"] for s in db.list_shops(active_only=True)][:2]
+    assert len(shops) == 2, "shares must be imported before this test"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "HYDRA 7PC", 4000])
+    ws.append(["111058302002", "HYDRA 14PC", None])
+    ws.merge_cells("C2:C3")
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", shops[0], shops[1]])
+    ws.append(["111058302001", 5000, 0])
+    ws.append(["111058302002", 0, 1000])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO},
+        files={
+            "target_file": ("shared.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run is not None
+    res = run.results["A"]
+    # Neither SKU is dropped, and the group answers 夠貨 as a whole.
+    assert {s.sku for s in res.skus} == {"111058302001", "111058302002"}
+    assert all(s.enough for s in res.skus), [(s.sku, s.coverage_status) for s in res.skus]
+    assert res.n_short == 0
+    assert sum(s.target_qty for s in res.skus) == 4000
+
+    rows = run.params["shared_targets"]
+    assert len(rows) == 1 and "4,000" in rows[0]
+
+    page = client.get(f"/run/{token}")
+    assert page.status_code == 200
+    assert "共用 Target 貨組" in page.text
+    assert "111058302002" in page.text
+    assert "貨組 2" in page.text
+
+    export = client.get(f"/run/{token}/export.xlsx")
+    assert export.status_code == 200
+    book = load_workbook(io.BytesIO(export.content))
+    compare = [c.value for c in book["比較"][2]]
+    assert compare[0] == "111058302001 + 111058302002"
+    assert compare[2] == 4000
+    params = [row for row in book["參數"].iter_rows(values_only=True)]
+    assert any(row[0] == "共用 Target" for row in params)

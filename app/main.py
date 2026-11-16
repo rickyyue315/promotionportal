@@ -552,11 +552,6 @@ async def run_create(
     if problems:
         return back("/run/new", "上載檔案有問題 — " + " ｜ ".join(problems), "error")
 
-    targets = [
-        calc.SkuTarget(sku=sku, target_qty=qty, description=desc)
-        for sku, desc, qty in parsed_t.rows
-    ]
-
     # The warehouse holds stock but never receives an allocation; its net stock
     # is what limits dispatch. Pending receipts at the warehouse are inbound
     # and are deliberately not counted.
@@ -597,6 +592,24 @@ async def run_create(
 
     has_sales = bool(parsed_s.mapped.get("last_month_sold")) and bool(
         parsed_s.mapped.get("mtd_sold")
+    )
+
+    # One target row can cover several SKUs (two pack sizes sharing a quantity,
+    # written as a merged cell or a blank). They are split here — once, before
+    # any scenario — so A/B/C and the export all report the same numbers.
+    targets = [
+        calc.SkuTarget(
+            sku=row.sku,
+            target_qty=row.qty,
+            description=row.description,
+            group=row.group,
+        )
+        for row in parsed_t.rows
+    ]
+    targets, shared_targets = calc.split_shared_targets(
+        targets,
+        sales_by_sku=sales_by_sku if has_sales else None,
+        stock_by_sku=stock_by_sku,
     )
 
     # SKUs in the stock file but absent from the target file are simply not
@@ -702,6 +715,9 @@ async def run_create(
         "warehouse_sites": sorted(warehouse_codes),
         "has_sales": has_sales,
         "has_moq": bool(parsed_s.mapped.get("moq")),
+        # How each shared target was split, so the result page and the export
+        # can show the basis without re-reading either file.
+        "shared_targets": shared_targets,
         # Snapshot the names so the page keeps the wording it was computed
         # with, even if the labels are renamed while it is still open.
         "scenario_labels": db.scenario_labels(),
@@ -915,7 +931,7 @@ def _totals(res) -> Dict[str, int]:
 
     out = {k: sum(getattr(s, k, 0) for s in res.skus) for k in keys}
     out["n_sku"] = len(res.skus)
-    out["n_short"] = sum(1 for s in res.skus if s.coverage_status == calc.COVERAGE_SHORT)
+    out["n_short"] = res.n_short
     return out
 
 
