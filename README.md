@@ -92,6 +92,7 @@ curl -s https://<你的網域>/health
 
 | 版本 | 日期 | 內容 |
 |------|------|------|
+| 1.6.2 | 2026-11-16 | 下載範本補回 `Start date (Promo)`／`End date (Promo)` 兩欄（真日期格，格式 `dd-mmm-yy`）；範本說明不再提 MOQ |
 | 1.6.1 | 2026-11-16 | 取消 Target 檔的 MOQ 提示：舊檔殘留 MOQ 欄照樣不讀，但不再在結果頁與上載頁提；MOQ 只在庫存檔有意義 |
 | 1.6.0 | 2026-11-16 | 自動讀推廣期：Target 檔有 `Start date (Promo)`／`End date (Promo)` 就直接用，畫面的日期只作後備；結果頁標明來源 |
 | 1.5.0 | 2026-11-16 | 讀 Supply Source 分流貨源：1／4 行貨列為「需開 PO」由 Buyer 落單、不佔 D001；2 倉貨由 RP 開 STO |
@@ -475,7 +476,7 @@ promo-portal/
 python -m pytest tests/ -q
 ```
 
-136 個測試，約 7 秒。涵蓋分配演算法、MOQ 進位（來源為庫存檔）、夠貨邊界、
+137 個測試，約 6 秒。涵蓋分配演算法、MOQ 進位（來源為庫存檔）、夠貨邊界、
 推廣日數縮小 Target、推廣期由 Target 檔自動讀取（含合併與多檔期）、派貨批次切分、
 日銷與 Launch Date、貨倉上限分配、
 Supply Source 貨源分流（行貨開 PO 不佔倉存）、

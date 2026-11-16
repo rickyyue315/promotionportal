@@ -235,6 +235,34 @@ def test_share_template_matches_the_requested_layout(client):
     assert data["HA19"][1] == "OM 1"  # carried over from the imported shares
 
 
+def test_target_template_carries_the_promo_dates(client):
+    """The template must show the two date columns the portal reads by default."""
+    from openpyxl import load_workbook
+
+    from app import excel_io
+
+    login(client, "adminpw", "Ricky")
+    resp = client.get("/run/template/target")
+    assert resp.status_code == 200
+
+    wb = load_workbook(io.BytesIO(resp.content), read_only=True)
+    header = next(wb["SKU Target"].iter_rows(values_only=True))
+    assert header == (
+        "SKU",
+        "貨品名稱",
+        "Target Qty",
+        "Start date (Promo)",
+        "End date (Promo)",
+    )
+
+    # Round-trip it: the template as shipped must be usable without editing it.
+    parsed = excel_io.parse_target_file(resp.content)
+    assert parsed.ok, parsed.errors
+    assert parsed.promo_start == date(2026, 11, 17)
+    assert parsed.promo_end == date(2026, 11, 26)
+    assert [row.sku for row in parsed.rows] == ["109991605010", "110331002001"]
+
+
 def test_share_import_reads_region_and_om(client):
     from openpyxl import Workbook
 

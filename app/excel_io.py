@@ -1054,18 +1054,32 @@ def export_share_template(
 
 
 def export_target_template() -> bytes:
+    # The template mirrors a real target sheet, promo window included: the two
+    # date columns are what the portal reads by default, so a template without
+    # them would send people back to typing dates on the form.
+    sample_start = date(2026, 11, 17)
+    sample_end = date(2026, 11, 26)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Target"
-    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(
+        ["SKU", "貨品名稱", "Target Qty", "Start date (Promo)", "End date (Promo)"]
+    )
     for cell in ws[1]:
         cell.font = _HEAD_FONT
         cell.fill = _HEAD_FILL
-    ws.append(["109991605010", "示範貨品 A", 1200])
-    ws.append(["110331002001", "示範貨品 B", 800])
-    ws.column_dimensions["A"].width = 18
-    ws.column_dimensions["B"].width = 30
-    ws.column_dimensions["C"].width = 12
+    for sku, name, qty in (
+        ("109991605010", "示範貨品 A", 1200),
+        ("110331002001", "示範貨品 B", 800),
+    ):
+        ws.append([sku, name, qty, sample_start, sample_end])
+        # Real date cells shown the way ops writes them (17-Nov-26), so the
+        # column can be copied straight out of a live sheet.
+        for col in (4, 5):
+            ws.cell(row=ws.max_row, column=col).number_format = "dd-mmm-yy"
+    for col, width in zip("ABCDE", (18, 30, 12, 18, 18)):
+        ws.column_dimensions[col].width = width
 
     note = wb.create_sheet("說明")
     note.append(["SKU", "必填，不可重複"])
@@ -1077,12 +1091,11 @@ def export_target_template() -> bytes:
             "系統當一個貨組，按銷量比例拆回各 SKU",
         ]
     )
-    note.append(["MOQ", "不在這個檔：MOQ 由店舖庫存檔的 MOQ 欄提供，留空即不進位"])
     note.append(
         [
             "Start date (Promo)／End date (Promo)",
-            "選填。有這兩欄就自動當推廣期（逐行重複或合併儲存格都可以）；"
-            "沒有或全部空白，才用畫面上填的日期",
+            "選填（格式例如 17-Nov-26）。有這兩欄就自動當推廣期，"
+            "逐行重複或整段合併儲存格都可以；留空才用畫面上填的日期",
         ]
     )
     return _save(wb)
