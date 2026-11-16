@@ -838,6 +838,23 @@ def _put_header(ws, headers: Sequence[str]) -> None:
     ws.append(cells)
 
 
+def _target_heads(params: dict) -> Tuple[str, str]:
+    """Column names for the full-period target and the dispatch-window share.
+
+    The detail sheet carries two target bases at once — 行貨 is allocated over
+    the whole promotion, 倉貨 over the first few days — so each quantity says
+    which period it is measured against. Without the days in the header the
+    same SKU looks like it has two unrelated allocations.
+    """
+    promo_days = params.get("promo_days")
+    dispatch_days = params.get("dispatch_days")
+    full = f"全期目標（{promo_days}日 Target）" if promo_days else "全期目標"
+    window = (
+        f"分配數量（{dispatch_days}日 Target）" if dispatch_days else "分配數量"
+    )
+    return full, window
+
+
 def export_run(
     run: dict,
     results: Dict[str, Any],
@@ -896,6 +913,7 @@ def export_run(
 
     # --- detail sheet per scenario ---
     desc_of = {r["sku"]: r.get("description", "") for r in compare_rows}
+    full_head, window_head = _target_heads(params)
     for sc in scenarios:
         res = results.get(sc)
         if not res:
@@ -905,7 +923,7 @@ def export_run(
             ws2,
             [
                 "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "分配基準", "佔比",
-                "分配數量", "現有庫存", "在途", "可用", "差距", "MOQ",
+                full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
                 "需求", "可派 STO", "開 PO（全期）", "缺貨",
                 "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
             ],
@@ -926,6 +944,7 @@ def export_run(
                     ln.supply_source,
                     "全期" if ln.alloc_full_period else "派貨期",
                     round(ln.share_pct, 6),
+                    ln.alloc_full_qty,
                     ln.alloc_qty,
                     ln.stock_qty,
                     ln.pending_qty,
@@ -961,6 +980,19 @@ def export_run(
         ws3.append(["推廣完結", params.get("promo_end", "")])
         ws3.append(["推廣日數", params.get("promo_days", "")])
         ws3.append(["派貨日數", params.get("dispatch_days", "")])
+        ws3.append(
+            [
+                f"明細「{full_head}」",
+                f"整段推廣（{params.get('promo_days', '')} 日）的 Target × 該店佔比",
+            ]
+        )
+        ws3.append(
+            [
+                f"明細「{window_head}」",
+                f"只計首 {params.get('dispatch_days', '')} 日的 Target × 該店佔比；"
+                "行貨店舖例外，仍按全期 Target 分配（看「分配基準」欄）",
+            ]
+        )
         ws3.append(
             [
                 "推廣期來源",

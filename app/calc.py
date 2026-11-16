@@ -204,6 +204,11 @@ class Line:
     supply_mode: str = SUPPLY_WAREHOUSE
     po_qty: int = 0
     alloc_full_period: bool = False
+    # The same shop's share of the *whole* promotion target, whichever basis
+    # ``alloc_qty`` was taken on. Kept for the report so "600 over 12 days"
+    # and "200 over the first 4" can be read side by side instead of one
+    # number that silently means different periods on different rows.
+    alloc_full_qty: int = 0
 
     @property
     def on_hand(self) -> int:
@@ -820,6 +825,7 @@ def compute_scenario(
                     "shop": shop,
                     "share": share,
                     "alloc": alloc,
+                    "alloc_full": full_alloc,
                     "stock": stock,
                     "pending": pending,
                     "gap": gap,
@@ -975,6 +981,7 @@ def compute_scenario(
                     ),
                     po_qty=po,
                     alloc_full_period=row["vendor"],
+                    alloc_full_qty=row["alloc_full"],
                 )
             )
 

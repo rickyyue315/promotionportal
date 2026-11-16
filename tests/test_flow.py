@@ -944,6 +944,11 @@ def test_vendor_po_covers_the_whole_promotion(client):
     assert detail.status_code == 200
     assert "行貨全期目標" in detail.text
     assert "全期" in detail.text
+    # The two target bases are labelled with their day counts, so 600 over 12
+    # days next to 200 over the first 4 cannot be mistaken for a mistake.
+    assert "全期目標" in detail.text
+    assert "12日 Target" in detail.text
+    assert "4日 Target" in detail.text
 
     export = client.get(f"/run/{token}/export.xlsx")
     from openpyxl import load_workbook
@@ -952,9 +957,17 @@ def test_vendor_po_covers_the_whole_promotion(client):
     rows = list(wb2["明細_A"].iter_rows(values_only=True))
     head = list(rows[0])
     basis = head.index("分配基準")
+    full = head.index("全期目標（12日 Target）")
+    windowed = head.index("分配數量（4日 Target）")
     by_shop = {r[2]: r for r in rows[1:]}
     assert by_shop["HB02"][basis] == "全期"
     assert by_shop["HB01"][basis] == "派貨期"
+    # 全期目標 = the shop's share of the whole promotion target, whoever
+    # supplies it; 分配數量 = what this route is actually measured against.
+    assert by_shop["HB02"][full] == 600        # half of 1,200
+    assert by_shop["HB02"][windowed] == 600    # 行貨: same, the PO covers 12 days
+    assert by_shop["HB01"][full] == 600        # half of 1,200
+    assert by_shop["HB01"][windowed] == 200    # 倉貨: half of 1,200 × 4/12
     wb2.close()
 
 
