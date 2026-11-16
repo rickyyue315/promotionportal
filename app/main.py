@@ -695,6 +695,12 @@ async def run_create(
 
     shares = {sc: db.get_shares(period, sc) for sc in ready}
     shops = db.active_shop_codes()
+    # Names are a label on the code, not part of the arithmetic, but the export
+    # is read by people who know "HB01" far less well than its shop name.
+    shop_names = {
+        row["code"]: (row["name"] or row["code"])
+        for row in db.list_shops(active_only=True)
+    }
     # Only shops that actually take part in this run can gate anything; keeping
     # the filtered list in the snapshot stops the result page explaining a rule
     # that never applied.
@@ -811,6 +817,9 @@ async def run_create(
         # with, even if the labels are renamed while it is still open.
         "scenario_labels": db.scenario_labels(),
         "rp_gate_shops": gate,
+        # Same idea as the labels: the shop name is what the sheet is computed
+        # with, so a rename while the result is still open does not rewrite it.
+        "shop_names": shop_names,
     }
     run = runstore.put(period, db.now(), name, params, results)
     db.log_usage(period, name, list(results), run.n_sku, run.n_short)
@@ -913,6 +922,7 @@ def run_detail(
         gate=_run_gate(run.params),
         supply=_run_supply(run.params),
         params=run.params,
+        shop_names=run.params.get("shop_names") or {},
         keep_minutes=runstore.TTL_SECONDS // 60,
     )
 

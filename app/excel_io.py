@@ -888,9 +888,9 @@ def _target_heads(params: dict) -> Tuple[str, str]:
 # Widths that fit the Chinese headings and the numbers under them. The default
 # 8.43 clips most of them, and this file is read by people, not by a parser.
 _DETAIL_WIDTHS = {
-    "A": 13, "B": 38, "C": 8, "D": 7, "E": 9, "F": 10, "G": 8, "H": 16,
-    "I": 16, "J": 9, "K": 7, "L": 7, "M": 7, "N": 7, "O": 8, "P": 10,
-    "Q": 12, "R": 8, "S": 8, "T": 9, "U": 9, "V": 9, "W": 22,
+    "A": 13, "B": 38, "C": 8, "D": 24, "E": 7, "F": 9, "G": 10, "H": 8,
+    "I": 16, "J": 16, "K": 9, "L": 7, "M": 7, "N": 7, "O": 7, "P": 8,
+    "Q": 10, "R": 12, "S": 8, "T": 8, "U": 9, "V": 9, "W": 9, "X": 22,
 }
 
 
@@ -900,8 +900,8 @@ def _detail_layout(ws, last_row: int) -> None:
     A frozen header and auto-filter are what the shop-by-shop sheets are used
     for: scroll to row 140 and you still know which column you are reading.
     """
-    ws.freeze_panes = "D2"
-    ws.auto_filter.ref = f"A1:W{last_row}"
+    ws.freeze_panes = "E2"
+    ws.auto_filter.ref = f"A1:X{last_row}"
     ws.row_dimensions[1].height = 45
     for col, width in _DETAIL_WIDTHS.items():
         ws.column_dimensions[col].width = width
@@ -999,7 +999,8 @@ def export_run(
             continue
         ws2 = wb.create_sheet(f"明細_{sc}")
         detail_heads = [
-            "SKU", "貨品名稱", "店舖", "貨源", "Supply Source", "分配基準", "佔比",
+            "SKU", "貨品名稱", "店舖", "店舖名稱", "貨源", "Supply Source",
+            "分配基準", "佔比",
             full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
             "需求", "可派 STO", "開 PO（全期）", "缺貨",
             "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
@@ -1008,9 +1009,10 @@ def export_run(
         _detail_layout(ws2, 1 + len(res.lines))
         _put_header(ws2, detail_heads)
         moq_of = {s.sku: s.moq for s in res.skus}
-        # Positions of the three action columns in the row list below: 需求 (14)
-        # is where 分配量 lands, 可派 STO (15), 開 PO（全期）(16), 缺貨 (17).
-        _STO_COL, _PO_COL, _SHORT_COL = 15, 16, 17
+        names = params.get("shop_names") or {}
+        # Positions of the three action columns in the row list below: 需求 (15)
+        # is the rounded need, 可派 STO (16), 開 PO（全期）(17), 缺貨 (18).
+        _STO_COL, _PO_COL, _SHORT_COL = 16, 17, 18
         for ln in res.lines:
             reason = ""
             if ln.blocked:
@@ -1021,6 +1023,7 @@ def export_run(
                 ln.sku,
                 desc_of.get(ln.sku, ""),
                 ln.shop_code,
+                names.get(ln.shop_code, ""),
                 "行貨" if ln.vendor else "倉貨",
                 ln.supply_source,
                 "全期" if ln.alloc_full_period else "派貨期",

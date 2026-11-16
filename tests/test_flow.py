@@ -1032,7 +1032,14 @@ def test_export_colours_what_has_to_be_raised(client):
     sto = head.index("可派 STO") + 1
     po = head.index("開 PO（全期）") + 1
     short = head.index("缺貨") + 1
+    name_col = head.index("店舖名稱") + 1
     rows = {ws.cell(row=r, column=3).value: r for r in range(2, ws.max_row + 1)}
+
+    # The shop name sits right after its code: the sheet is read by people who
+    # know "HB01 倉貨店" better than "HB01".
+    assert head[3] == "店舖名稱"
+    assert ws.cell(row=rows["HB01"], column=name_col).value == "HB01 倉貨店"
+    assert ws.cell(row=rows["HB02"], column=name_col).value == "HB02 行貨店"
 
     # Warehouse shop: 50 on an STO, 150 short, nothing on a PO.
     hb01 = rows["HB01"]
@@ -1052,8 +1059,8 @@ def test_export_colours_what_has_to_be_raised(client):
 
     # Layout: the identifying columns stay put, the header wraps, and the
     # filter covers exactly the rows that exist.
-    assert ws.freeze_panes == "D2"
-    assert ws.auto_filter.ref == f"A1:W{1 + len(rows)}"
+    assert ws.freeze_panes == "E2"
+    assert ws.auto_filter.ref == f"A1:X{1 + len(rows)}"
     assert ws.row_dimensions[1].height >= 40
     assert ws["A1"].alignment.wrap_text is True
     assert ws.column_dimensions["B"].width >= 30

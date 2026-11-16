@@ -87,7 +87,8 @@
           <tbody>
           {% for ln in lines %}
             <tr class="{{ 'is-short' if ln.dispatch_qty > 0 }}">
-              <td class="mono strong">{{ ln.shop_code }}</td>
+              <td><span class="mono strong">{{ ln.shop_code }}</span>
+                {% if shop_names.get(ln.shop_code) %}<div class="dim" style="font-size:11.5px">{{ shop_names.get(ln.shop_code) }}</div>{% endif %}</td>
               {% if supply.has_column %}
               <td>
                 {% if ln.vendor %}
@@ -190,7 +191,8 @@
           <tbody>
           {% for r in by_shop %}
             <tr class="{{ 'is-short' if r.dispatch > 0 }}">
-              <td class="mono strong">{{ r.shop_code }}</td>
+              <td><span class="mono strong">{{ r.shop_code }}</span>
+                {% if shop_names.get(r.shop_code) %}<div class="dim" style="font-size:11.5px">{{ shop_names.get(r.shop_code) }}</div>{% endif %}</td>
               <td class="num">{{ r.alloc | num }}</td>
               <td class="num">{{ r.stock | num }}</td>
               <td class="num">{% if r.dispatch %}<span class="badge danger">{{ r.dispatch | num }}</span>{% else %}<span class="dim">—</span>{% endif %}</td>
