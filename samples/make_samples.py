@@ -92,10 +92,13 @@ def targets() -> Path:
     ws = wb.active
     ws.title = "SKU Target"
     # No MOQ here on purpose: the minimum order rides on the stock file.
-    _head(ws, ["SKU", "貨品名稱", "Target Qty"])
+    # The promo window is repeated on every line, the way ops actually fills
+    # it, so the portal can take the dates from here instead of the form. The
+    # window matches the tests' PROMO dict: 4 days, sent as 4 days.
+    _head(ws, ["SKU", "貨品名稱", "Target Qty", "Start date (Promo)", "End date (Promo)"])
     for sku, name, qty, _moq in SKUS:
-        ws.append([sku, name, qty])
-    for col, width in zip("ABC", (18, 28, 12)):
+        ws.append([sku, name, qty, "02-Nov-26", "05-Nov-26"])
+    for col, width in zip("ABCDE", (18, 28, 12, 18, 18)):
         ws.column_dimensions[col].width = width
     path = OUT / "sample_target.xlsx"
     wb.save(path)

@@ -286,9 +286,12 @@ def main() -> None:
             data={
                 "period": "2026-11",
                 # 14 days of promotion but only 4 days of stock: 1400 -> 400.
+                # Typed on purpose (date_source=manual) so the screenshot keeps
+                # showing the scaling; the sample file's own dates are 4 days.
                 "promo_start": "2026-11-16",
                 "promo_end": "2026-11-29",
                 "dispatch_days": "4",
+                "date_source": "manual",
             },
             files={
                 "target_file": ("t.xlsx", (samples / "sample_target.xlsx").read_bytes()),

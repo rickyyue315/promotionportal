@@ -520,6 +520,7 @@ async def run_create(
     promo_start: str = Form(""),
     promo_end: str = Form(""),
     dispatch_days: int = Form(4),
+    date_source: str = Form("auto"),
     target_file: UploadFile = File(...),
     stock_file: UploadFile = File(...),
 ):
@@ -535,34 +536,59 @@ async def run_create(
             "error",
         )
 
-    start = _parse_date(promo_start)
-    end = _parse_date(promo_end)
-    problems: List[str] = []
-    if not start or not end:
-        problems.append("請填寫推廣開始日期與完結日期")
-    elif end < start:
-        problems.append("完結日期不可早於開始日期")
-    if dispatch_days < 1:
-        problems.append("派貨日數至少 1 日")
-    if problems:
-        return back("/run/new", "；".join(problems), "error")
-
-    promo = calc.PromoWindow(start=start, end=end, dispatch_days=dispatch_days)
-    if promo.days <= 0:
-        return back("/run/new", "推廣日數不正確，請檢查日期", "error")
-
     target_data = await target_file.read()
     stock_data = await stock_file.read()
 
     parsed_t = excel_io.parse_target_file(target_data)
     parsed_s = excel_io.parse_stock_file(stock_data, set(db.active_shop_codes()))
 
+    # The target sheet already prints the promo window on its lines, so by
+    # default that is the window we use: the dates on screen are then the same
+    # ones the buyer read in the file, with nothing to re-type and mistype.
+    # "manual" is the escape hatch for a file that carries no dates or carries
+    # the wrong ones.
+    manual_start = _parse_date(promo_start)
+    manual_end = _parse_date(promo_end)
+    file_dates = parsed_t.promo_start and parsed_t.promo_end
+    if date_source == "manual" or not file_dates:
+        start, end = manual_start, manual_end
+        promo_source = "manual"
+    else:
+        start, end = parsed_t.promo_start, parsed_t.promo_end
+        promo_source = "target_file"
+
+    problems: List[str] = []
+    if not start or not end:
+        problems.append(
+            "請填寫推廣開始日期與完結日期"
+            if date_source == "manual"
+            else "Target 檔讀不到推廣日期，請填寫推廣開始日期與完結日期"
+        )
+    elif end < start:
+        problems.append("完結日期不可早於開始日期")
+    if dispatch_days < 1:
+        problems.append("派貨日數至少 1 日")
     if parsed_t.errors:
         problems.append("SKU Target：" + "；".join(parsed_t.errors))
     if parsed_s.errors:
         problems.append("店舖庫存：" + "；".join(parsed_s.errors))
     if problems:
-        return back("/run/new", "上載檔案有問題 — " + " ｜ ".join(problems), "error")
+        return back("/run/new", "上載檔案或日期有問題 — " + " ｜ ".join(problems), "error")
+
+    promo = calc.PromoWindow(start=start, end=end, dispatch_days=dispatch_days)
+    if promo.days <= 0:
+        return back("/run/new", "推廣日數不正確，請檢查日期", "error")
+
+    # A hand-typed date that disagrees with the sheet is exactly the mistake
+    # this feature exists to remove, so say it out loud rather than swap the
+    # numbers in silence.
+    promo_note = ""
+    if promo_source == "target_file" and manual_start and manual_end:
+        if (manual_start, manual_end) != (start, end):
+            promo_note = (
+                f"畫面的日期 {manual_start:%d-%b-%y} → {manual_end:%d-%b-%y} 與 Target 檔不符，"
+                f"已採用檔案的 {start:%d-%b-%y} → {end:%d-%b-%y}。"
+            )
 
     # The warehouse holds stock but never receives an allocation; its net stock
     # is what limits dispatch. Pending receipts at the warehouse are inbound
@@ -699,12 +725,6 @@ async def run_create(
             res.warnings.append(
                 "庫存檔沒有 MOQ 欄位，全部 SKU 當作 MOQ = 1（需求不進位）"
             )
-    if parsed_t.mapped.get("moq_ignored"):
-        for res in results.values():
-            res.warnings.append(
-                f"Target 檔的「{parsed_t.mapped['moq_ignored']}」欄已忽略 —— "
-                "MOQ 改由店舖庫存檔讀取"
-            )
     if moq_conflict:
         for res in results.values():
             res.warnings.append(
@@ -724,6 +744,10 @@ async def run_create(
                 f"（例：{target_only[0]}）"
             )
 
+    if promo_note:
+        for res in results.values():
+            res.warnings.insert(0, promo_note)
+
     # Nothing about the files or the numbers goes to disk. The finished result
     # is handed to runstore (memory, a couple of hours) so the result page,
     # the drill-downs and the export work; the database only learns that a
@@ -737,6 +761,7 @@ async def run_create(
         "stock_file": stock_file.filename or "",
         "promo_start": start.isoformat(),
         "promo_end": end.isoformat(),
+        "promo_source": promo_source,
         "promo_days": promo.days,
         "dispatch_days": promo.effective_dispatch_days,
         "as_of": db.today().isoformat(),

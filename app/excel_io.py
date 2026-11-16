@@ -26,6 +26,30 @@ SHOP_RE = re.compile(r"^[A-Z]{1,4}\d{1,4}[A-Z0-9]{0,2}$")
 SKU_KEYS = ("sku", "article", "item", "product code", "貨號", "產品編號", "貨品編號", "編號")
 TARGET_KEYS = ("target qty", "target", "qty", "quantity", "數量", "目標", "目標數量")
 MOQ_KEYS = ("moq", "minimum order", "起訂", "最小訂購")
+# The promo window is usually repeated on every line of the target sheet, so
+# the dates can be read instead of re-typed on the upload form.
+PROMO_START_KEYS = (
+    "start date (promo)",
+    "promo start date",
+    "promo start",
+    "start date",
+    "promotion start",
+    "推廣開始日期",
+    "推廣開始",
+    "開始日期",
+)
+PROMO_END_KEYS = (
+    "end date (promo)",
+    "promo end date",
+    "promo end",
+    "end date",
+    "promotion end",
+    "推廣完結日期",
+    "推廣結束日期",
+    "推廣完結",
+    "完結日期",
+    "結束日期",
+)
 DESC_KEYS = ("description", "desc", "name", "名稱", "描述", "貨品名稱")
 SHOP_KEYS = ("shop", "site", "store", "outlet", "店舖", "店鋪", "分店", "門市")
 # Ordered most-specific first. A SAP export carries Safety Stock, Stock in
@@ -205,10 +229,52 @@ class Parsed:
     errors: List[str] = field(default_factory=list)
     sheet: str = ""
     mapped: Dict[str, str] = field(default_factory=dict)
+    # Only the target file carries these: the promo window printed on its
+    # lines. Empty means the upload form's dates are the only source.
+    promo_start: Optional[date] = None
+    promo_end: Optional[date] = None
 
     @property
     def ok(self) -> bool:
         return not self.errors and bool(self.rows)
+
+
+def _promo_window(
+    rows: Sequence[Sequence[Any]], i_start: Optional[int], i_end: Optional[int]
+) -> Tuple[Optional[date], Optional[date], List[Tuple[date, date]]]:
+    """The promo dates the sheet repeats, plus any rounds it also mentions.
+
+    Counting rather than reading the first non-empty cell handles both shapes
+    seen in practice: a date typed on every line, and a merged block where only
+    the top cell holds the value. A file that spans two promo rounds keeps the
+    round with the most lines and reports the others instead of picking
+    silently.
+    """
+    starts: Dict[date, int] = {}
+    ends: Dict[date, int] = {}
+    pairs: Dict[Tuple[date, date], int] = {}
+
+    for row in rows:
+        s = to_date(row[i_start]) if i_start is not None and i_start < len(row) else None
+        e = to_date(row[i_end]) if i_end is not None and i_end < len(row) else None
+        if s:
+            starts[s] = starts.get(s, 0) + 1
+        if e:
+            ends[e] = ends.get(e, 0) + 1
+        if s and e and e >= s:
+            pairs[(s, e)] = pairs.get((s, e), 0) + 1
+
+    def top(counter: Dict[date, int]) -> Optional[date]:
+        if not counter:
+            return None
+        return min(counter.items(), key=lambda kv: (-kv[1], kv[0]))[0]
+
+    if pairs:
+        best = min(pairs.items(), key=lambda kv: (-kv[1], kv[0][0], kv[0][1]))[0]
+        others = [p for p in pairs if p != best]
+        return best[0], best[1], others
+    return top(starts), top(ends), []
+
 
 
 # ---------------------------------------------------------------------------
@@ -241,10 +307,9 @@ def parse_target_file(
     i_sku = _find(headers, SKU_KEYS)
     i_target = _find(headers, TARGET_KEYS, exclude={i_sku} if i_sku is not None else ())
     i_desc = _find(headers, DESC_KEYS, exclude={i_sku} if i_sku is not None else ())
-    # MOQ lives on the stock side (SKU × shop), not here. The column is still
-    # detected so an old template can be told it is being ignored, instead of
-    # silently producing dispatches that do not respect the number in it.
-    i_moq = _find(headers, MOQ_KEYS, exclude={i_sku} if i_sku is not None else ())
+    # MOQ lives on the stock side (SKU × shop), not here. A leftover MOQ column
+    # in an old template is simply not read: it is not a quantity to act on and
+    # the run has nothing useful to say about it, so it stays out of the way.
 
     if i_sku is None:
         out.errors.append(
@@ -262,13 +327,46 @@ def parse_target_file(
         "target": raw[h][i_target],
         "description": raw[h][i_desc] if i_desc is not None else "",
     }
-    if i_moq is not None:
-        # Recorded, not used: the run warns on the result page so nobody reads
-        # the dispatch numbers as if this column had been applied.
-        out.mapped["moq_ignored"] = str(raw[h][i_moq])
-        out.warnings.append(
-            f"Target 檔的「{raw[h][i_moq]}」欄已忽略 —— MOQ 改由店舖庫存檔讀取"
+
+    # ---- promo window printed inside the sheet -----------------------------
+    taken = {i for i in (i_sku, i_target, i_desc) if i is not None}
+    i_pstart = _find(headers, PROMO_START_KEYS, exclude=taken)
+    i_pend = _find(
+        headers,
+        PROMO_END_KEYS,
+        exclude=taken | ({i_pstart} if i_pstart is not None else set()),
+    )
+    if i_pstart is not None or i_pend is not None:
+        out.mapped["promo_start"] = (
+            str(raw[h][i_pstart]) if i_pstart is not None else ""
         )
+        out.mapped["promo_end"] = str(raw[h][i_pend]) if i_pend is not None else ""
+        d_start, d_end, other_rounds = _promo_window(body, i_pstart, i_pend)
+        if i_pstart is not None and i_pend is None:
+            out.warnings.append(
+                f"Target 檔只有「{raw[h][i_pstart]}」而沒有推廣完結日期欄，"
+                "推廣期改用畫面輸入的日期。"
+            )
+        elif i_pend is not None and i_pstart is None:
+            out.warnings.append(
+                f"Target 檔只有「{raw[h][i_pend]}」而沒有推廣開始日期欄，"
+                "推廣期改用畫面輸入的日期。"
+            )
+        elif d_start and d_end:
+            out.promo_start, out.promo_end = d_start, d_end
+            if other_rounds:
+                spread = "、".join(
+                    f"{s:%d-%b-%y}→{e:%d-%b-%y}" for s, e in sorted(other_rounds)[:4]
+                )
+                out.warnings.append(
+                    f"Target 檔有不止一組推廣日期（{spread}），"
+                    f"已採用行數最多的一組：{d_start:%d-%b-%y} → {d_end:%d-%b-%y}。"
+                )
+        else:
+            out.warnings.append(
+                f"Target 檔的「{raw[h][i_pstart]}」／「{raw[h][i_pend]}」兩欄都是空白，"
+                "推廣期改用畫面輸入的日期。"
+            )
 
     seen: Dict[str, int] = {}
     duplicates: List[str] = []
@@ -862,6 +960,14 @@ def export_run(
         ws3.append(["推廣完結", params.get("promo_end", "")])
         ws3.append(["推廣日數", params.get("promo_days", "")])
         ws3.append(["派貨日數", params.get("dispatch_days", "")])
+        ws3.append(
+            [
+                "推廣期來源",
+                "Target 檔的 Start date (Promo)／End date (Promo)"
+                if params.get("promo_source") == "target_file"
+                else "畫面輸入",
+            ]
+        )
     if params.get("as_of"):
         ws3.append(["銷售數據截止", params.get("as_of", "")])
     if params.get("warehouse_sites"):
@@ -972,6 +1078,13 @@ def export_target_template() -> bytes:
         ]
     )
     note.append(["MOQ", "不在這個檔：MOQ 由店舖庫存檔的 MOQ 欄提供，留空即不進位"])
+    note.append(
+        [
+            "Start date (Promo)／End date (Promo)",
+            "選填。有這兩欄就自動當推廣期（逐行重複或合併儲存格都可以）；"
+            "沒有或全部空白，才用畫面上填的日期",
+        ]
+    )
     return _save(wb)
 
 

@@ -29,7 +29,12 @@
   <div class="body split" style="font-size:13px;gap:18px;flex-wrap:wrap">
     <div><span class="dim">推廣期</span>
       <strong>{{ params.promo_start }}</strong> → <strong>{{ params.promo_end }}</strong>
-      <span class="dim">（{{ params.promo_days }} 日）</span></div>
+      <span class="dim">（{{ params.promo_days }} 日）</span>
+      {% if params.promo_source == 'target_file' %}
+      <span class="badge neutral">由 Target 檔讀取</span>
+      {% elif params.promo_source %}
+      <span class="badge neutral">畫面輸入</span>
+      {% endif %}</div>
     <div><span class="dim">每次派貨</span> <strong>{{ params.dispatch_days }} 日</strong>
       <span class="dim">，派貨目標 = Target × {{ params.dispatch_days }}/{{ params.promo_days }}</span></div>
     <div><span class="dim">銷售數據截止</span> {{ params.as_of }}</div>

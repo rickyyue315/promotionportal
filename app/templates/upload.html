@@ -45,17 +45,28 @@
       <span class="hint">只派頭幾日貨，Target 會按日數縮小</span>
     </header>
     <div class="body">
+      <div class="choice-row">
+        <label class="choice">
+          <input type="radio" name="date_source" value="auto" checked>
+          <span>自動：讀 Target 檔的 <span class="mono">Start date (Promo)</span> ／
+            <span class="mono">End date (Promo)</span></span>
+        </label>
+        <label class="choice">
+          <input type="radio" name="date_source" value="manual">
+          <span>手動輸入日期</span>
+        </label>
+      </div>
       <div class="row">
         <div style="flex:1">
-          <label class="field"><span>推廣開始日期</span>
+          <label class="field"><span id="startLabel">推廣開始日期</span>
             <input class="input" type="date" name="promo_start" id="promoStart"
-                   value="{{ promo_start }}" required>
+                   value="{{ promo_start }}">
           </label>
         </div>
         <div style="flex:1">
-          <label class="field"><span>推廣完結日期</span>
+          <label class="field"><span id="endLabel">推廣完結日期</span>
             <input class="input" type="date" name="promo_end" id="promoEnd"
-                   value="{{ promo_end }}" required>
+                   value="{{ promo_end }}">
           </label>
         </div>
         <div style="flex:.7">
@@ -82,7 +93,9 @@
             <input class="file" type="file" name="target_file" accept=".xlsx,.xls" required>
           </label>
           <p class="dim" style="font-size:12.5px;margin:0">
-            只要 SKU 與 Target Qty 兩欄，不需要 MOQ（MOQ 由庫存檔提供）。
+            只要 SKU 與 Target Qty 兩欄；如有
+            <span class="mono">Start date (Promo)</span>／<span class="mono">End date (Promo)</span>
+            會自動當推廣期。
             同一貨品的多個包裝可只填第一行、其餘留空或合併儲存格，系統當一個貨組按銷量比例拆。
             <a href="/run/template/target">下載範本</a>
           </p>
@@ -163,8 +176,35 @@ const startEl = document.getElementById('promoStart');
 const endEl = document.getElementById('promoEnd');
 const daysEl = document.getElementById('dispatchDays');
 const hintEl = document.getElementById('promoHint');
+const startLabel = document.getElementById('startLabel');
+const endLabel = document.getElementById('endLabel');
+const modeEls = document.querySelectorAll('input[name="date_source"]');
+
+function autoMode() {
+  const picked = document.querySelector('input[name="date_source"]:checked');
+  return !picked || picked.value === 'auto';
+}
 
 function refreshPromo() {
+  const auto = autoMode();
+  // In auto mode the dates are read from the target file; the fields stay as
+  // a fallback for a file that does not carry them, so they are not required.
+  startEl.required = !auto;
+  endEl.required = !auto;
+  startEl.style.opacity = auto ? '.65' : '';
+  endEl.style.opacity = auto ? '.65' : '';
+  startLabel.textContent = auto ? '推廣開始日期（檔案沒有時才用）' : '推廣開始日期';
+  endLabel.textContent = auto ? '推廣完結日期（檔案沒有時才用）' : '推廣完結日期';
+
+  if (auto) {
+    const days = (startEl.value && endEl.value)
+      ? Math.floor((new Date(endEl.value) - new Date(startEl.value)) / 86400000) + 1
+      : 0;
+    hintEl.textContent = '推廣期會直接用 Target 檔的 Start date (Promo)／End date (Promo)，'
+      + '不用再填。檔案沒有這兩欄或全部空白時，才用下面手填的日期。'
+      + (days > 0 ? `　手填那組是 ${days} 日。` : '');
+    return;
+  }
   if (!startEl.value || !endEl.value) {
     hintEl.textContent = '請填寫推廣開始與完結日期。';
     return;
@@ -181,6 +221,7 @@ function refreshPromo() {
     + `（例如 Target 1,400 → ${example.toLocaleString()}）。`;
 }
 [startEl, endEl, daysEl].forEach(el => el.addEventListener('input', refreshPromo));
+modeEls.forEach(el => el.addEventListener('change', refreshPromo));
 refreshPromo();
 </script>
 

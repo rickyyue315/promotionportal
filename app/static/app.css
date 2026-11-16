@@ -163,6 +163,14 @@ label.field > span {
 .row { display: flex; gap: 12px; flex-wrap: wrap; }
 .row > * { flex: 1; min-width: 150px; }
 
+/* Inline either/or pick, e.g. where the promo dates come from. */
+.choice-row { display: flex; gap: 20px; flex-wrap: wrap; margin: 0 0 14px; }
+.choice {
+  display: inline-flex; align-items: flex-start; gap: 7px;
+  font-size: 13px; color: var(--text); cursor: pointer; line-height: 1.4;
+}
+.choice input { margin: 2px 0 0; accent-color: var(--accent); cursor: pointer; }
+
 /* ---------- table ---------- */
 .table-wrap { overflow: auto; max-height: 68vh; }
 table.tbl { width: 100%; border-collapse: separate; border-spacing: 0; font-size: 13px; }

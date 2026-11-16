@@ -423,8 +423,10 @@ def test_moq_comes_from_the_stock_file_not_the_target(client):
 
     params = run.params
     assert params["has_moq"] is True
+    # A leftover MOQ column in the target file is just not read. No warning is
+    # raised about it: the result page only lists things the buyer must act on.
     warnings = " ".join(params["warnings"]["A"])
-    assert "已忽略" in warnings and "MOQ" in warnings
+    assert "已忽略" not in warnings
 
 
 def test_stock_file_without_moq_does_not_round(client):
@@ -900,3 +902,167 @@ def test_supply_source_codes_are_configurable(client):
     finally:
         db.set_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY)
     assert db.vendor_supply_sources() == ["1", "4"]
+
+
+# ---------------------------------------------------------------------------
+# promo dates printed in the target file
+# ---------------------------------------------------------------------------
+
+
+def _promo_target(rows, merge_dates=False) -> bytes:
+    """A target sheet whose promo window sits on its lines, as ops sends it."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty", "Start date (Promo)", "End date (Promo)"])
+    for row in rows:
+        ws.append(list(row))
+    if merge_dates and len(rows) > 1:
+        ws.merge_cells(start_row=2, start_column=4, end_row=1 + len(rows), end_column=4)
+        ws.merge_cells(start_row=2, start_column=5, end_row=1 + len(rows), end_column=5)
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_promo_dates_are_read_from_the_target_file():
+    from app import excel_io
+
+    parsed = excel_io.parse_target_file(
+        _promo_target(
+            [
+                ("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26"),
+                ("111058302002", "HYDRA 14PC", 1200, "17-Nov-26", "26-Nov-26"),
+            ]
+        )
+    )
+    assert parsed.ok, parsed.errors
+    assert parsed.promo_start == date(2026, 11, 17)
+    assert parsed.promo_end == date(2026, 11, 26)
+    assert parsed.warnings == [], parsed.warnings
+
+
+def test_merged_promo_dates_are_read_once():
+    """Dates merged over the block still count, as they do for shared targets."""
+    from app import excel_io
+
+    parsed = excel_io.parse_target_file(
+        _promo_target(
+            [
+                ("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26"),
+                ("111058302002", "HYDRA 14PC", 1200, None, None),
+            ],
+            merge_dates=True,
+        )
+    )
+    assert parsed.promo_start == date(2026, 11, 17)
+    assert parsed.promo_end == date(2026, 11, 26)
+
+
+def test_two_promo_rounds_keep_the_most_used_and_say_so():
+    from app import excel_io
+
+    parsed = excel_io.parse_target_file(
+        _promo_target(
+            [
+                ("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26"),
+                ("111058302002", "HYDRA 14PC", 1200, "17-Nov-26", "26-Nov-26"),
+                ("111058302003", "HYDRA 28PC", 800, "01-Dec-26", "10-Dec-26"),
+            ]
+        )
+    )
+    assert parsed.promo_start == date(2026, 11, 17)
+    assert parsed.promo_end == date(2026, 11, 26)
+    assert any("不止一組推廣日期" in w for w in parsed.warnings)
+
+
+def test_blank_promo_columns_fall_back_to_the_form():
+    from app import excel_io
+
+    parsed = excel_io.parse_target_file(
+        _promo_target([("111058302001", "HYDRA 7PC", 4000, None, None)])
+    )
+    assert parsed.promo_start is None and parsed.promo_end is None
+    assert any("兩欄都是空白" in w for w in parsed.warnings)
+
+
+def test_promo_dates_come_from_the_file_not_the_form(client):
+    from openpyxl import Workbook
+
+    login(client, "adminpw", "Ricky")
+    shops = [s["code"] for s in db.list_shops(active_only=True)][:2]
+    target = _promo_target(
+        [("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26")]
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", shops[0], shops[1]])
+    ws.append(["111058302001", 1000, 2000])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    # No date_source field: automatic is what the upload page posts by default.
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO},
+        files={
+            "target_file": ("with_dates.xlsx", target),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run is not None, resp.headers["location"]
+    assert run.params["promo_source"] == "target_file"
+    assert run.params["promo_start"] == "2026-11-17"
+    assert run.params["promo_end"] == "2026-11-26"
+    assert run.params["promo_days"] == 10
+    # 4 dispatch days out of a 10-day promo: 4000 -> 1600.
+    assert run.results["A"].skus[0].dispatch_target == 1600
+    # The typed dates disagreed with the sheet, which must not pass silently.
+    assert any("與 Target 檔不符" in w for w in run.params["warnings"]["A"])
+
+    page = client.get(f"/run/{token}")
+    assert "由 Target 檔讀取" in page.text
+
+
+def test_manual_dates_override_the_target_file(client):
+    from openpyxl import Workbook
+
+    login(client, "adminpw", "Ricky")
+    shops = [s["code"] for s in db.list_shops(active_only=True)][:2]
+    target = _promo_target(
+        [("111058302001", "HYDRA 7PC", 4000, "17-Nov-26", "26-Nov-26")]
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", shops[0], shops[1]])
+    ws.append(["111058302001", 1000, 2000])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO, "date_source": "manual"},
+        files={
+            "target_file": ("with_dates.xlsx", target),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run is not None, resp.headers["location"]
+    assert run.params["promo_source"] == "manual"
+    assert run.params["promo_start"] == "2026-11-02"
+    assert run.params["promo_days"] == 4
+    # 4 dispatch days of a 4-day promo: the target is not scaled.
+    assert run.results["A"].skus[0].dispatch_target == 4000
