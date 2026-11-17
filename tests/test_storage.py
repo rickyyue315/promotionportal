@@ -117,3 +117,23 @@ def test_backup_requires_admin():
         resp = anon.get("/admin/backup/db", follow_redirects=False)
     assert resp.status_code == 303
     assert "/login" in resp.headers["location"]
+
+
+def test_old_supply_default_is_corrected_on_boot():
+    """4 became 倉貨, so a stored "1,4" must not keep routing shops to a PO."""
+    with db.db() as conn:
+        conn.execute("DELETE FROM setting WHERE key = ?", (db.SUPPLY_FIX_KEY,))
+        conn.execute(
+            "UPDATE setting SET value = ? WHERE key = ?", ("1,4", db.SUPPLY_KEY)
+        )
+    try:
+        db.init_db()
+        assert db.vendor_supply_sources() == ["1"]
+
+        # The correction is one-off: a value set afterwards is left alone,
+        # otherwise every deploy would silently undo an admin decision.
+        db.set_setting(db.SUPPLY_KEY, "1,4")
+        db.init_db()
+        assert db.vendor_supply_sources() == ["1", "4"]
+    finally:
+        db.set_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY)

@@ -51,7 +51,7 @@
       <line x1="937" y1="88" x2="959" y2="88"/>
     </g>
 
-    <text x="31" y="162" font-size="12.5" fill="#82827a">行貨店舖（Supply source 1／4）不經 D001：需求直接變成須開 PO，用全期 Target 計；倉貨店舖才由 D001 開 STO。</text>
+    <text x="31" y="162" font-size="12.5" fill="#82827a">行貨店舖（Supply source 1）不經 D001：需求直接變成須開 PO，用全期 Target 計；倉貨店舖才由 D001 開 STO。</text>
 
     <!-- group inset -->
     <rect x="31" y="186" width="1138" height="126" rx="10" fill="#e7f2ee" stroke="#c9ded6" stroke-dasharray="5 4"/>

@@ -407,6 +407,117 @@ def test_sap_export_picks_the_right_columns():
     assert rows[("111058302001", "D001")].rp_type == "ND"
 
 
+def _sap_consign_bytes(rows) -> bytes:
+    """SAP export where consignment stock may be the only stock column filled."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        [
+            "Article", "Site", "SaSa Net Stock", "Unrestr. Consignment",
+            "Pending Received", "Supply source",
+        ]
+    )
+    for sku, site, net, consign, source in rows:
+        ws.append([sku, site, net, consign, 0, source])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_consignment_stock_counts_as_shop_stock():
+    """Either column can hold the units; a consignment-only line is not a blank."""
+    from app import excel_io
+
+    parsed = excel_io.parse_stock_file(
+        _sap_consign_bytes(
+            [
+                ("111058302001", "HA01", 10, 5, "2"),     # both: added
+                ("111058302001", "HA02", None, 40, "2"),  # only consignment
+                ("111058302001", "HA03", 7, None, "2"),   # only net stock
+            ]
+        ),
+        {"HA01", "HA02", "HA03"},
+    )
+    assert not parsed.errors
+    assert parsed.mapped["stock"] == "SaSa Net Stock"
+    assert parsed.mapped["consignment"] == "Unrestr. Consignment"
+    qty = {(r.sku, r.shop): r.qty for r in parsed.rows}
+    assert qty[("111058302001", "HA01")] == 15
+    assert qty[("111058302001", "HA02")] == 40   # previously dropped as "not a number"
+    assert qty[("111058302001", "HA03")] == 7
+    # Both mixes are reported, so 15 and 40 are explainable without the file.
+    assert any("Unrestr. Consignment" in w and "相加" in w for w in parsed.warnings)
+    assert any("SaSa Net Stock 無數" in w for w in parsed.warnings)
+
+
+def test_consignment_stock_reduces_the_dispatch(client):
+    """The shop's need is measured against consignment stock too."""
+    from app import db, runstore
+
+    period = "2027-06"
+    sku = "111058303003"
+
+    db.upsert_shop("HA04", "HA04 寄售店", "HK")
+    db.save_shares(period, "A", {"HA04": 1.0}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 60])
+    target = io.BytesIO()
+    wb.save(target)
+
+    stock = _sap_consign_bytes(
+        [
+            (sku, "D001", 100, 0, "2"),
+            (sku, "HA04", 0, 20, "2"),   # shop holds 20 as consignment, 0 net
+        ]
+    )
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run.params["has_consignment"] is True
+    line = {ln.shop_code: ln for ln in run.results["A"].lines}["HA04"]
+    assert line.stock_qty == 20
+    assert line.dispatch_qty == 40        # 60 target − 20 consignment
+    # The note from reading the file follows the result instead of staying on
+    # the upload form.
+    assert any(
+        "Unrestr. Consignment" in w for w in run.params["warnings"]["A"]
+    )
+
+    page = client.get(f"/run/{token}")
+    assert page.status_code == 200
+    assert "Unrestr. Consignment" in page.text
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    params_sheet = {
+        row[0]: (row[1] if len(row) > 1 else "")
+        for row in book["參數"].iter_rows(values_only=True)
+        if row and row[0]
+    }
+    assert "Unrestr. Consignment" in str(params_sheet.get("店舖存貨口徑", ""))
+    book.close()
+
+
 def test_hb87_blocks_nd_and_dispatches_rf(client):
     from app import db
 
@@ -851,7 +962,7 @@ def _sap_supply_bytes(rows) -> bytes:
 
 
 def test_supply_source_sends_vendor_shops_to_a_po(client):
-    """1／4 行貨 goes on a PO; only the warehouse shop competes for D001."""
+    """1 行貨 goes on a PO; only the warehouse shops compete for D001."""
     period = "2027-04"
     sku = "111058303001"
 
@@ -893,7 +1004,7 @@ def test_supply_source_sends_vendor_shops_to_a_po(client):
 
     run = runstore.get(token)
     assert run.params["has_supply_source"] is True
-    assert run.params["vendor_supply_sources"] == ["1", "4"]
+    assert run.params["vendor_supply_sources"] == ["1"]
 
     lines = {ln.shop_code: ln for ln in run.results["A"].lines}
     vendor = lines["HA02"]
@@ -969,7 +1080,7 @@ def test_vendor_po_covers_the_whole_promotion(client):
         [
             (sku, "精華", "D001", "2", 300),
             (sku, "精華", "HB01", "2", 0),
-            (sku, "精華", "HB02", "4", 0),   # 行貨
+            (sku, "精華", "HB02", "1", 0),   # 行貨
         ]
     )
 
@@ -1075,7 +1186,7 @@ def test_export_colours_what_has_to_be_raised(client):
         [
             (sku, "面膜", "D001", "2", 50),
             (sku, "面膜", "HB01", "2", 0),
-            (sku, "面膜", "HB02", "4", 0),
+            (sku, "面膜", "HB02", "1", 0),
         ]
     )
 
@@ -1277,7 +1388,7 @@ def test_supply_source_codes_are_configurable(client):
         assert "1,4,5" in page.text
     finally:
         db.set_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY)
-    assert db.vendor_supply_sources() == ["1", "4"]
+    assert db.vendor_supply_sources() == ["1"]
 
 
 # ---------------------------------------------------------------------------

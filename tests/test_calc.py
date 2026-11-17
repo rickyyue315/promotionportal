@@ -690,7 +690,7 @@ class TestSharedTarget:
 
 
 class TestSupplySource:
-    """1／4 行貨 is a PO for the buyer; 2 倉貨 is an STO from D001."""
+    """1 行貨 is a PO for the buyer; 2／4 倉貨 is an STO from D001."""
 
     def test_codes_are_normalised(self):
         for raw in (2, 2.0, "2", " 2 ", "2.0"):
@@ -698,9 +698,9 @@ class TestSupplySource:
         assert supply_code(None) == ""
         assert supply_code(True) == ""
 
-    def test_vendor_codes_are_one_and_four(self):
+    def test_only_one_is_vendor(self):
         assert supply_mode("1") == SUPPLY_VENDOR
-        assert supply_mode("4") == SUPPLY_VENDOR
+        assert supply_mode("4") == SUPPLY_WAREHOUSE         # 4 經 D001 派貨
         assert supply_mode("2") == SUPPLY_WAREHOUSE
         assert supply_mode("") == SUPPLY_WAREHOUSE          # no column / blank
         assert supply_mode("9") == SUPPLY_WAREHOUSE         # unrecognised
@@ -708,6 +708,29 @@ class TestSupplySource:
     def test_vendor_route_is_configurable(self):
         assert supply_mode("3", ["3"]) == SUPPLY_VENDOR
         assert supply_mode("1", ["3"]) == SUPPLY_WAREHOUSE
+
+    def test_code_four_draws_on_the_warehouse(self):
+        # 4 used to be treated as 行貨. It is dispatched through D001, so it is
+        # capped like any warehouse shop and never becomes a PO line.
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            [SkuTarget("K", 200)],
+            {},
+            warehouse_by_sku={"K": 50},
+            supply_by_sku={"K": {"S1": "4", "S2": "2"}},
+        )
+        by_shop = {ln.shop_code: ln for ln in res.lines}
+        assert by_shop["S1"].vendor is False
+        assert by_shop["S1"].po_qty == 0
+        # The 50 units are shared by the two warehouse shops, never handed out
+        # twice: 25 each, with the remainder going to one of them.
+        assert sum(ln.dispatch_qty for ln in res.lines) == 50
+        assert res.skus[0].po_qty == 0
+        assert res.skus[0].short_qty == 150
+        # A known warehouse code is not an "unrecognised code".
+        assert not any("未設定的代碼" in w for w in res.warnings)
 
     def test_vendor_shop_is_not_capped_by_the_warehouse(self):
         res = compute_scenario(
@@ -742,7 +765,7 @@ class TestSupplySource:
             [SkuTarget("K", 120)],
             {},
             warehouse_by_sku={"K": 60},
-            supply_by_sku={"K": {"PO1": "4", "WH1": "2"}},
+            supply_by_sku={"K": {"PO1": "1", "WH1": "2"}},
         )
         by_shop = {ln.shop_code: ln for ln in res.lines}
         assert by_shop["PO1"].po_qty == 60
@@ -831,7 +854,7 @@ class TestVendorFullPeriodTarget:
             promo=PromoWindow(
                 start=date(2026, 11, 17), end=date(2026, 11, 26), dispatch_days=4
             ),
-            supply_by_sku={"K": {"V1": "4"}},
+            supply_by_sku={"K": {"V1": "1"}},
         )
         line = res.lines[0]
         assert line.alloc_qty == 1000

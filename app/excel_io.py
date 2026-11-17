@@ -79,6 +79,18 @@ STOCK_REJECT = (
     "consignment",
     "quality",
 )
+# Consignment stock sits at the shop but belongs to the vendor. SAP reports it
+# in its own column, often with SaSa Net Stock left blank for that line, so the
+# two are read as one shop stock figure (see the row loop below).
+CONSIGN_KEYS = (
+    "unrestr. consignment",
+    "unrestr consignment",
+    "unrestricted consignment",
+    "consignment stock",
+    "consignment",
+    "寄售存貨",
+    "寄售",
+)
 RP_KEYS = ("rp type", "rp_type", "rp code", "rp")
 SUPPLY_KEYS = ("supply source", "supply_source", "supplysource", "source of supply", "貨源", "供應來源")
 PENDING_KEYS = ("pending received", "pending", "在途")
@@ -189,12 +201,16 @@ def looks_like_shop(value: Any, known: set) -> bool:
 class StockRow:
     """One SKU × shop line from the stock file.
 
-    Only ``qty`` (SaSa Net Stock) and ``pending`` (Pending Received) are
-    quantities we act on. The sales figures are rates fuel for the 4-day cover
-    calculation, not stock. ``moq`` rides along because the minimum order is a
-    packaging property of the SKU, which SAP keeps on this row rather than on
-    the target list. ``supply_source`` says who supplies the shop — 1／4 行貨
-    (buyer's PO) or 2 倉貨 (STO from D001) — so the row can be routed correctly.
+    ``qty`` is the shop's usable stock: ``SaSa Net Stock`` plus
+    ``Unrestr. Consignment``. The two are reported separately by SAP and either
+    one can be the populated column, so they are added; a line with only
+    consignment stock is real stock, not a blank row. ``pending`` (Pending
+    Received) is what is already on its way. The sales figures are rates fuel
+    for the 4-day cover calculation, not stock. ``moq`` rides along because the
+    minimum order is a packaging property of the SKU, which SAP keeps on this
+    row rather than on the target list. ``supply_source`` says who supplies the
+    shop — 1 行貨 (buyer's PO), 2／4 倉貨 (STO from D001) — so the row can be
+    routed correctly.
     """
 
     sku: str
@@ -494,10 +510,13 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         return out
 
     i_shop = _find(headers, SHOP_KEYS, exclude={i_sku}, reject=("indicator",))
+    # Found first: "Unrestricted ..." would otherwise be claimed by the stock
+    # keys below, and the real stock column would be left unmatched.
+    i_consign = _find(headers, CONSIGN_KEYS, exclude={i_sku, i_shop})
     i_stock = _find(
         headers,
         STOCK_KEYS,
-        exclude={i_sku, i_shop} if i_shop is not None else {i_sku},
+        exclude={i_sku, i_shop, i_consign},
         reject=STOCK_REJECT,
     )
     i_rp = _find(headers, RP_KEYS, exclude={i_sku, i_shop, i_stock})
@@ -552,11 +571,12 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         # A pivot has no RP Type or sales columns; the gate treats RP as not
         # provided and the 4-day cover simply cannot be calculated.
         out.rows = [StockRow(sku, shop, qty) for (sku, shop), qty in pairs.items()]
-    elif i_shop is not None and i_stock is not None:
+    elif i_shop is not None and (i_stock is not None or i_consign is not None):
         out.mapped = {
             "sku": original[i_sku],
             "shop": original[i_shop],
-            "stock": original[i_stock],
+            "stock": original[i_stock] if i_stock is not None else "",
+            "consignment": original[i_consign] if i_consign is not None else "",
             "rp_type": original[i_rp] if i_rp is not None else "",
             "pending": original[i_pending] if i_pending is not None else "",
             "last_month_sold": original[i_last] if i_last is not None else "",
@@ -576,6 +596,8 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         supply_map: Dict[Tuple[str, str], str] = {}
         supply_conflict = set()
         dup2 = set()
+        consign_only = set()
+        both_stock = set()
         bad = 0
         for offset, row in enumerate(body, start=h + 2):
             if not any(c not in (None, "") for c in row):
@@ -586,14 +608,31 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             shop = str(row[i_shop]).strip().upper() if i_shop < len(row) and row[i_shop] is not None else ""
             if not sku or not shop:
                 continue
-            qty = to_number(row[i_stock]) if i_stock < len(row) else None
-            if qty is None:
+            net = (
+                to_number(row[i_stock])
+                if i_stock is not None and i_stock < len(row)
+                else None
+            )
+            consign = (
+                to_number(row[i_consign])
+                if i_consign is not None and i_consign < len(row)
+                else None
+            )
+            # Either column can carry the shop's stock: SAP sometimes reports
+            # the units as Unrestr. Consignment and leaves SaSa Net Stock
+            # blank. A line with neither is not a stock line.
+            if net is None and consign is None:
                 bad += 1
                 continue
             key = (sku, shop)
+            if net and consign:
+                both_stock.add(f"{sku}@{shop}")
+            elif consign:
+                consign_only.add(f"{sku}@{shop}")
+            qty = int(round(net or 0)) + int(round(consign or 0))
             if key in pairs2:
                 dup2.add(f"{sku}@{shop}")
-            pairs2[key] = pairs2.get(key, 0) + int(round(qty))
+            pairs2[key] = pairs2.get(key, 0) + qty
 
             pending = to_number(row[i_pending]) if i_pending is not None and i_pending < len(row) else None
             if pending:
@@ -659,6 +698,20 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             out.warnings.append(
                 "以下 SKU × 店舖的 Supply Source 不一致，已當作倉貨（D001 出 STO）："
                 + "、".join(sorted(supply_conflict)[:5])
+            )
+        if consign_only:
+            out.warnings.append(
+                f"有 {len(consign_only)} 個 SKU × 店舖的 SaSa Net Stock 無數，"
+                "已計入 Unrestr. Consignment 的數量（例："
+                + "、".join(sorted(consign_only)[:3])
+                + "）"
+            )
+        if both_stock:
+            out.warnings.append(
+                f"有 {len(both_stock)} 個 SKU × 店舖同時有 SaSa Net Stock 與 "
+                "Unrestr. Consignment，已相加（例："
+                + "、".join(sorted(both_stock)[:3])
+                + "）"
             )
         if bad:
             out.warnings.append(f"有 {bad} 行的庫存不是數字，已略過")
@@ -1188,9 +1241,25 @@ def export_run(
         )
     if params.get("as_of"):
         ws3.append(["銷售數據截止", params.get("as_of", "")])
+    ws3.append(
+        [
+            "店舖存貨口徑",
+            "SaSa Net Stock ＋ Unrestr. Consignment；任一欄有數就計，"
+            "兩欄同時有數會相加"
+            if params.get("has_consignment")
+            else "只計 SaSa Net Stock（庫存檔沒有 Unrestr. Consignment 欄）",
+        ]
+    )
     if params.get("warehouse_sites"):
         ws3.append(["貨倉", "、".join(params["warehouse_sites"])])
-        ws3.append(["貨倉口徑", "只計 SaSa Net Stock；Pending Received 為入倉量，不計入"])
+        ws3.append(
+            [
+                "貨倉口徑",
+                "SaSa Net Stock"
+                + (" ＋ Unrestr. Consignment" if params.get("has_consignment") else "")
+                + "；Pending Received 為入倉量，不計入",
+            ]
+        )
     ws3.append(
         [
             "明細「可調出」",
@@ -1215,7 +1284,7 @@ def export_run(
             [
                 "Supply Source 規則",
                 "行貨由 Buyer 開 PO，不佔 D001 倉存、不計入缺貨；"
-                "2（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
+                "2／4（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
             ]
         )
         ws3.append(
@@ -1349,11 +1418,13 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
     note.append(
         [
-            "長表可加一欄 Supply Source；1／4 是行貨（Buyer 開 PO，不佔 D001 倉存），"
-            "2 是倉貨（RP 由 D001 開 STO）",
+            "長表可加一欄 Supply Source；1 是行貨（Buyer 開 PO，不佔 D001 倉存），"
+            "2／4 是倉貨（RP 由 D001 開 STO，4 一樣經 D001 派貨）",
         ]
     )
-    note.append(["SAP 匯出的明細（Article / Site / SaSa Net Stock / RP Type / MOQ）可直接上載"])
+    note.append(
+        ["SAP 匯出的明細（Article / Site / SaSa Net Stock / Unrestr. Consignment / RP Type / MOQ）可直接上載"]
+    )
     return _save(wb)
 
 

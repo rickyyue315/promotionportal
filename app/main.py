@@ -770,7 +770,7 @@ async def run_create(
         for res in results.values():
             res.warnings.append(
                 "庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）；"
-                "如有行貨店舖，請在檔案加一欄 Supply Source（1／4 行貨、2 倉貨）"
+                "如有行貨店舖，請在檔案加一欄 Supply Source（1 行貨；2／4 倉貨）"
             )
 
     if parsed_s.rows and not parsed_s.mapped.get("moq"):
@@ -801,6 +801,16 @@ async def run_create(
         for res in results.values():
             res.warnings.insert(0, promo_note)
 
+    # What reading the stock file had to assume — duplicate rows added up, lines
+    # skipped, consignment folded into SaSa Net Stock — describes the numbers in
+    # this result, so it belongs on the result page rather than disappearing with
+    # the upload form. The "偵測為…" lines only say which layout was recognised
+    # and would be noise on every run.
+    stock_notes = [w for w in parsed_s.warnings if not w.startswith("偵測為")]
+    if stock_notes:
+        for res in results.values():
+            res.warnings.extend(stock_notes)
+
     # Nothing about the files or the numbers goes to disk. The finished result
     # is handed to runstore (memory, a couple of hours) so the result page,
     # the drill-downs and the export work; the database only learns that a
@@ -822,6 +832,10 @@ async def run_create(
         "has_sales": has_sales,
         "has_moq": bool(parsed_s.mapped.get("moq")),
         "has_supply_source": has_supply,
+        # Whether the stock figure includes Unrestr. Consignment: the result
+        # page and the export both state the 口徑 instead of leaving the reader
+        # to guess what "現有庫存" was made of.
+        "has_consignment": bool(parsed_s.mapped.get("consignment")),
         # Snapshot the rule as it was applied: changing the setting later must
         # not relabel a batch that was already computed.
         "vendor_supply_sources": vendors if has_supply else [],

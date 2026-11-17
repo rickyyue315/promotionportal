@@ -81,7 +81,7 @@
               <th class="num">佔比</th>
               <th class="num" title="整段推廣（{{ params.promo_days or '—' }} 日）的 Target × 該店佔比，用來對照下面只派首幾日的分配數量">全期目標<br><span class="dim" style="font-weight:400">{{ params.promo_days or '—' }}日 Target</span></th>
               <th class="num" title="行貨店舖按全期 Target 分配（標示「全期」）；倉貨店舖按派貨日數分配">分配數量<br><span class="dim" style="font-weight:400">{{ params.dispatch_days or '—' }}日 Target</span></th>
-              <th class="num">現有庫存</th>
+              <th class="num" title="{{ 'SaSa Net Stock ＋ Unrestr. Consignment（任一欄有數就計）' if params.has_consignment else 'SaSa Net Stock' }}">現有庫存</th>
               <th class="num">在途</th>
               <th class="num">差距</th>
               <th class="num">需求</th>

@@ -301,11 +301,16 @@
     {% endif %}
     {% if supply.codes %}
     <br>Supply Source {{ supply.codes | join('／') }} 屬行貨：要由 <strong>Buyer 開 PO</strong> 為店舖落單，
-    不由 D001 出貨，所以不佔倉存、不計入「缺貨」；Supply Source 2（或其他代碼）屬倉貨，由 RP 開 STO 從 D001 取貨。
+    不由 D001 出貨，所以不佔倉存、不計入「缺貨」；Supply Source 2／4（或其他代碼）屬倉貨，
+    由 RP 開 STO 從 D001 取貨（4 一樣經 D001 派貨）。
     <br>行貨的 PO 覆蓋<strong>整段推廣</strong>，所以它的分配量用全期 Target 計算，不受「派貨日數」縮小；
     倉貨仍只派首 {{ params.dispatch_days or '—' }} 日。同一 SKU 在行貨店與倉貨店會用不同基準，明細頁會逐行標明。
     {% elif not supply.has_column %}
     <br>庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）。
+    {% endif %}
+    {% if params.has_consignment %}
+    <br>店舖庫存 = <strong>SaSa Net Stock ＋ Unrestr. Consignment</strong>；兩欄任一有數都當作有庫存，
+    同時有數會相加（寄售貨一樣在店舖，可以賣）。
     {% endif %}
   </div>
 </section>

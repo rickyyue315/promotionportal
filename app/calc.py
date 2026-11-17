@@ -134,7 +134,12 @@ RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
 
 SUPPLY_WAREHOUSE = "warehouse"  # 倉貨: D001 -> shop, RP raises an STO
 SUPPLY_VENDOR = "vendor"  # 行貨: vendor -> shop, buyer raises a PO
-DEFAULT_VENDOR_SOURCES = ("1", "4")  # Supply source codes meaning 行貨
+# Only 1 is 行貨. 4 is dispatched through D001 as well, so it behaves like 2 —
+# the user corrected this on 2026-11-17 after seeing 4 handled as a PO.
+DEFAULT_VENDOR_SOURCES = ("1",)
+# Codes we know to be warehouse-supplied even though they are not the plain "2".
+# Kept so the "unrecognised code" warning only fires for codes nobody explained.
+KNOWN_WAREHOUSE_SOURCES = ("2", "4")
 
 
 @dataclass(frozen=True)
@@ -427,11 +432,12 @@ def supply_mode(
 ) -> str:
     """Which route a shop takes for this SKU: vendor (PO) or warehouse (STO).
 
-    Only the codes configured as 行貨 (1 and 4 by default) mean vendor. ``2``
-    is 倉貨, and so is anything blank or unrecognised — that is what the app did
-    before Supply source existed, and it keeps a file without the column
-    behaving exactly as before. The caller warns when the fallback is used, so
-    the assumption never stays silent.
+    Only the code configured as 行貨 (``1`` by default) means vendor. ``2`` is
+    倉貨, and so is ``4`` — that code is dispatched through D001 as well — and so
+    is anything blank or unrecognised. Blank has always meant warehouse: that is
+    what the app did before Supply source existed, and it keeps a file without
+    the column behaving exactly as before. The caller warns when the fallback is
+    used, so the assumption never stays silent.
     """
     vendors = {str(v).strip().upper() for v in vendor_sources if str(v).strip()}
     return SUPPLY_VENDOR if supply_code(code).upper() in vendors else SUPPLY_WAREHOUSE
@@ -756,6 +762,9 @@ def compute_scenario(
     warehouse_pending = warehouse_pending_by_sku or {}
     supply_map = supply_by_sku or {}
     vendors = {str(v).strip().upper() for v in vendor_sources if str(v).strip()}
+    known_wh = {
+        str(c).strip().upper() for c in KNOWN_WAREHOUSE_SOURCES if str(c).strip()
+    }
     sales_known = sales_by_sku is not None and as_of is not None
     promo_days = promo.days if promo else 0
 
@@ -838,7 +847,7 @@ def compute_scenario(
 
             if vendor:
                 vendor_shops.add(shop)
-            elif code and code.upper() != "2" and code.upper() not in vendors:
+            elif code and code.upper() not in known_wh and code.upper() not in vendors:
                 odd_sources.add(code)
 
             rows.append(
