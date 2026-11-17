@@ -914,7 +914,7 @@ def _promo_note(params: dict) -> str:
         return (
             f"推廣期共 {promo_days} 日，只派首 {dispatch_days} 日："
             f"派貨目標 = Target × {dispatch_days}/{promo_days}；"
-            "行貨店舖例外，按全期 Target 開 PO（全期）"
+            "行貨店舖例外，按全期 Target 開 PO"
         )
     return f"推廣期共 {promo_days} 日，整段推廣一次派貨：派貨目標 = Target"
 
