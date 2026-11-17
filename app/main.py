@@ -567,6 +567,8 @@ async def run_create(
     promo_end: str = Form(""),
     dispatch_days: int = Form(4),
     date_source: str = Form("auto"),
+    group_topup: str = Form(""),
+    suggest_transfer: str = Form(""),
     target_file: UploadFile = File(...),
     stock_file: UploadFile = File(...),
 ):
@@ -645,6 +647,9 @@ async def run_create(
     rp_by_sku: Dict[str, Dict[str, str]] = {}
     sales_by_sku: Dict[str, Dict[str, calc.ShopSales]] = {}
     supply_by_sku: Dict[str, Dict[str, str]] = {}
+    # The shop's own Safety Stock: never stock, only the floor a member of a
+    # shared target is topped up to (see calc's "Safety floor for a group").
+    safety_by_sku: Dict[str, Dict[str, int]] = {}
     warehouse_by_sku: Dict[str, int] = {}
     warehouse_pending: Dict[str, int] = {}
     # MOQ is a SKU property carried on the stock file; when shops disagree the
@@ -673,6 +678,8 @@ async def run_create(
         # warehouse's own row is skipped above — 忽視 D001.
         if row.supply_source:
             supply_by_sku.setdefault(row.sku, {})[row.shop] = row.supply_source
+        if row.safety > 0:
+            safety_by_sku.setdefault(row.sku, {})[row.shop] = row.safety
         sales_by_sku.setdefault(row.sku, {})[row.shop] = calc.ShopSales(
             last_month_sold=row.last_month_sold,
             mtd_sold=row.mtd_sold,
@@ -713,10 +720,14 @@ async def run_create(
     shops = db.active_shop_codes()
     # Names are a label on the code, not part of the arithmetic, but the export
     # is read by people who know "HB01" far less well than its shop name.
+    shop_rows = db.list_shops(active_only=True)
     shop_names = {
         row["code"]: (row["name"] or row["code"])
-        for row in db.list_shops(active_only=True)
+        for row in shop_rows
     }
+    # OM is the boundary for a stock transfer: an OM answers for its own shops,
+    # so the suggestion never crosses into another OM's stock.
+    om_by_shop = {row["code"]: str(row["om"] or "").strip() for row in shop_rows}
     # Only shops that actually take part in this run can gate anything; keeping
     # the filtered list in the snapshot stops the result page explaining a rule
     # that never applied.
@@ -724,7 +735,15 @@ async def run_create(
     gate = [code for code in db.rp_gate_shops() if code in shop_set]
     has_warehouse = bool(warehouse_by_sku)
     has_supply = bool(parsed_s.mapped.get("supply_source"))
+    has_safety = bool(parsed_s.mapped.get("safety"))
     vendors = db.vendor_supply_sources()
+    # The floor is a deliberate over-send, so it is an opt-in per run rather
+    # than an always-on rule; the form's checkbox arrives only when ticked.
+    topup_on = group_topup.strip().lower() not in ("", "0", "false", "off", "no")
+    # A transfer notice needs 4–7 days and may not clear before the promotion
+    # opens, so this is off unless the operator asks for it. It never replaces
+    # the PO/STO numbers.
+    transfer_on = suggest_transfer.strip().lower() not in ("", "0", "false", "off", "no")
 
     results = calc.compute_all_scenarios(
         shares,
@@ -741,6 +760,10 @@ async def run_create(
         moq_by_sku=moq_by_sku,
         supply_by_sku=supply_by_sku,
         vendor_sources=vendors,
+        safety_by_sku=safety_by_sku,
+        group_topup=topup_on,
+        om_by_shop=om_by_shop,
+        suggest_transfer=transfer_on,
     )
 
     gate_set = set(gate)
@@ -784,6 +807,15 @@ async def run_create(
             res.warnings.append(
                 f"有 {len(moq_conflict)} 個 SKU 在庫存檔不同店舖的 MOQ 不一致，"
                 "已取最大值（例：" + sorted(moq_conflict)[0] + "）"
+            )
+
+    if topup_on and not has_safety and any(t.group for t in targets):
+        # The rule was asked for but cannot run: say so rather than leaving a
+        # ticked checkbox that quietly did nothing.
+        for res in results.values():
+            res.warnings.append(
+                "已勾選「貨組補底」，但庫存檔沒有 Safety Stock 欄位，所以沒有補底；"
+                "要補底請在庫存檔加一欄 Safety Stock（每個 SKU × 店舖的補底線）"
             )
 
     if stock_only:
@@ -846,6 +878,14 @@ async def run_create(
         # the column, so 參數 has to say whether a blank means "not provided".
         "has_brand": bool(parsed_t.mapped.get("brand")),
         "has_supply_source": has_supply,
+        # Whether the stock file carried Safety Stock, and whether the floor was
+        # asked for: the page and the export explain the rule with these two.
+        "has_safety": has_safety,
+        "group_topup": topup_on,
+        # Advice only, and off unless asked for: the transfer notice may not
+        # clear before the promotion starts, so it never stands in for a PO/STO.
+        "suggest_transfer": transfer_on,
+        "has_om": any(om_by_shop.values()),
         # Whether the stock figure includes Unrestr. Consignment: the result
         # page and the export both state the 口徑 instead of leaving the reader
         # to guess what "現有庫存" was made of.
@@ -945,9 +985,13 @@ def run_detail(
         lines = _sorted_lines([ln for ln in all_lines if ln.sku == sku])
         by_shop: List[dict] = []
         selected = next((s for s in skus if s.sku == sku), None)
+        # Only the chosen SKU's pairs: the table sits under its shop list, so
+        # mixing in other SKUs would read as if it belonged to this one.
+        transfers = [t for t in (res.transfers if res else []) if t.sku == sku]
     else:
         lines = []
         selected = None
+        transfers = []
         by_shop = _by_shop(all_lines, bool(only_need))
 
     return render(
@@ -959,6 +1003,7 @@ def run_detail(
         selected=selected,
         lines=lines,
         by_shop=by_shop,
+        transfers=transfers,
         sku=sku,
         only_need=only_need,
         available_scenarios=available,
@@ -1098,15 +1143,20 @@ def _totals(res) -> Dict[str, int]:
         "warehouse_qty", "warehouse_pending", "total_dispatch", "need_qty",
         "short_qty", "blocked_qty", "expected_sales", "gap_target",
         "shortfall_qty", "surplus_qty", "po_qty", "sto_qty", "po_target",
+        "topup_qty",
     )
     if res is None:
         out = {k: 0 for k in keys}
-        out.update({"n_sku": 0, "n_short": 0})
+        out.update({"n_sku": 0, "n_short": 0, "transfer_qty": 0, "n_transfer": 0})
         return out
 
     out = {k: sum(getattr(s, k, 0) for s in res.skus) for k in keys}
     out["n_sku"] = len(res.skus)
     out["n_short"] = res.n_short
+    # Transfers live beside the lines rather than on a SKU summary: they are
+    # pairs of shops, and their sum is what the result page reports.
+    out["transfer_qty"] = sum(t.qty for t in res.transfers)
+    out["n_transfer"] = len(res.transfers)
     return out
 
 

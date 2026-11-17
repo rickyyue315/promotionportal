@@ -77,6 +77,20 @@
         </div>
       </div>
       <p class="dim" id="promoHint" style="font-size:12.5px;margin:0"></p>
+      <label class="choice" style="margin-top:14px">
+        <input type="checkbox" name="group_topup" value="1" checked>
+        <span>貨組補底：共用 Target 的貨組，如果某間店某個包裝的可用量（現有＋在途）
+          低於該 SKU 的 <span class="mono">Safety Stock</span>，照樣補派至 Safety 水平
+          （按 MOQ 進位）。避免一個包裝食盡成組 Target 之後，另一個包裝在店裡斷貨。
+          只影響貨組成員，非貨組 SKU 不變。</span>
+      </label>
+      <label class="choice" style="margin-top:10px">
+        <input type="checkbox" name="suggest_transfer" value="1">
+        <span>建議調貨（<strong>預設不開</strong>）：只在貨倉（D001）不足派時，
+          為<strong>同一個 OM</strong> 的店舖配對「有盈餘的店 → 缺貨的店」，
+          列出建議數量。純屬參考，<strong>不會取代開 PO／開 STO</strong>；
+          調貨通知一般 4–7 日，推廣開始前未必完成程序，請自行判斷是否採用。</span>
+      </label>
     </div>
   </section>
 
@@ -167,6 +181,7 @@
       <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
       {% endif %}
       <p style="margin:0 0 10px"><strong>3c. 貨源</strong>　Supply Source 1／4 是行貨：需求列為「需開 PO」，由 Buyer 落單，不佔 D001；PO 要覆蓋整段推廣，所以行貨店舖用<strong>全期 Target</strong> 計，不按派貨日數縮小。2 是倉貨，由 RP 開 STO，只計首 {{ dispatch_days }} 日。4 的貨雖然經 D001 過數，但貨源仍屬行貨。</p>
+      <p style="margin:0 0 10px"><strong>3d. 貨組補底</strong>　有勾選時，貨組成員多一層底線：某間店的某個包裝「現有庫存＋在途」低於該 SKU 的 <span class="mono">Safety Stock</span>，就補派至 Safety（按 MOQ 進位）。補底不按派貨日數縮小，因為 Safety 是店舖常設的底線；D001 不夠派時，補底排最後，正常需求先滿足。</p>
       <p style="margin:0 0 10px"><strong>4. 倉存上限</strong>　D001 計 SaSa Net Stock ＋ Unrestr. Consignment；只有倉貨店舖的需求會撞上限，超過時按比例分配，差額就是缺貨。</p>
       <p style="margin:0"><strong>5. 銷售差距</strong>　日銷 =（上月銷量＋本月銷量）÷ 有紀錄日數（新產品由 Launch Date 起計）；用日銷 × 推廣日數與 Target、及與「庫存＋派貨」比較。</p>
       <p style="margin:12px 0 0;padding-top:11px;border-top:1px solid var(--border)">
@@ -222,6 +237,10 @@
       <div>
         <div style="font-weight:600;color:var(--text);margin-bottom:2px">⑥ 表上怎樣顯示</div>
         比較表與明細都逐個 SKU 一行，每行 Target 是它分到的那份（加起來就是貨組總數）；貨組關係看 SKU 旁邊的「貨組 2」標籤，Excel 則寫在 SKU 儲存格的註解。這樣匯出檔可以按 SKU 篩選。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">⑦ 補底（可關）</div>
+        封頂之後，如果某間店某個包裝的可用量低於該 SKU 的 <span class="mono">Safety Stock</span>，會補派至 Safety 水平（按 MOQ 進位）—— 即使整組 Target 已經夠貨。例如 7PC 在店裡有 450 件、14PC 0 件，Target 400 件本來不派，14PC 仍會補到底線。這是刻意的「多派」，所以放在上面的勾選框，可以整批關掉；明細「補底」欄與 Excel 會標明哪幾行是補底。
       </div>
     </div>
 

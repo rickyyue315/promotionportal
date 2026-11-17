@@ -151,6 +151,12 @@
         <span class="num"><span class="badge warn">{{ t.blocked_qty | num }} 件</span></span>
       </div>
       {% endif %}
+      {% if params.group_topup and t.topup_qty %}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim" title="貨組成員在該店的可用量（現有＋在途）低於 Safety Stock，所以補派至 Safety 水平；這部分 Target 並沒有要求">　↳ 其中 Safety 補底</span>
+        <span class="num"><span class="badge neutral">{{ t.topup_qty | num }} 件</span></span>
+      </div>
+      {% endif %}
       <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
         <span class="dim">倉存缺貨</span>
         <span class="num">
@@ -158,6 +164,15 @@
           <span class="dim" style="margin-left:6px">需求 − 可派</span>
         </span>
       </div>
+      {% if params.suggest_transfer %}
+      <div style="display:flex;justify-content:space-between;padding:5px 0;border-bottom:1px solid #f0f0ec">
+        <span class="dim" title="只在 D001 不足派時，為同一個 OM 的店舖配對盈餘 → 缺貨；調貨通知 4–7 日，未必趕及推廣開始，不能代替開 PO／STO">　↳ 建議調貨（同 OM）</span>
+        <span class="num">
+          {% if t.transfer_qty %}<span class="badge neutral">{{ t.transfer_qty | num }} 件 · {{ t.n_transfer }} 組</span>
+          {% else %}<span class="dim">沒有可配對</span>{% endif %}
+        </span>
+      </div>
+      {% endif %}
       <div style="display:flex;justify-content:space-between;padding:5px 0">
         <span class="dim">不夠貨（Target 未覆蓋）</span>
         <span class="num">
@@ -203,6 +218,22 @@
       同一貨組共用一個 Target：夠貨按整組存貨判斷，各店需求先以組的缺口封頂，再按上列比例拆回各 SKU。
       比較表與明細都逐個 SKU 一行，貨組關係見 SKU 旁邊的「貨組」標籤；Excel 的 SKU 儲存格有滑鼠註解寫明整組與拆法。
     </p>
+    {% if params.group_topup %}
+    <p class="dim" style="font-size:12.5px;margin:8px 0 0">
+      <strong style="color:var(--text)">Safety 補底已開啟</strong>：封頂之後，如果某間店某個包裝的可用量（現有＋在途）
+      低於該 SKU 的 <span class="mono">Safety Stock</span>，會補派至 Safety 水平（按 MOQ 進位），
+      即使整組 Target 已夠貨 —— 避免一個包裝食盡成組 Target、另一個包裝在店裡斷貨。
+      這部分不按派貨日數縮小，並在 D001 不夠派時排最後；明細頁與 Excel 的「補底」欄會逐行標明。
+      {% if not params.has_safety %}
+      <strong style="color:#b3392c">但庫存檔沒有 Safety Stock 欄位，所以這次沒有實際補底。</strong>
+      {% endif %}
+    </p>
+    {% else %}
+    <p class="dim" style="font-size:12.5px;margin:8px 0 0">
+      這次<strong style="color:var(--text)">沒有套用 Safety 補底</strong>（執行時未勾選）：
+      整組夠貨的店舖不會再補派，某個包裝在該店可能維持 0 件。
+    </p>
+    {% endif %}
   </div>
 </section>
 {% endif %}
@@ -315,6 +346,11 @@
     {% if params.has_consignment %}
     <br>店舖庫存 = <strong>SaSa Net Stock ＋ Unrestr. Consignment</strong>；兩欄任一有數都當作有庫存，
     同時有數會相加（寄售貨一樣在店舖，可以賣）。
+    {% endif %}
+    {% if params.suggest_transfer %}
+    <br><strong>建議調貨</strong>只在 D001 不足派時才有，逐個 SKU 在明細頁列出「出貨店 → 收貨店」與數量。
+    只配對同一個 OM 的店舖、不按 MOQ 進位；它是附屬建議，不能代替開 PO／開 STO
+    （調貨通知一般 4–7 日，推廣開始前未必完成程序）。
     {% endif %}
   </div>
 </section>

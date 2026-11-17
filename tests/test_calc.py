@@ -721,6 +721,191 @@ class TestSharedTarget:
         assert dispatched >= 500
 
 
+class TestGroupSafetyTopup:
+    """A covered group still lifts a pack to the shop's Safety Stock.
+
+    The user's case (2026-11-17): group Target 400, the 7PC holds 450 in the
+    shop and the 14PC holds none. The group is covered, so nothing used to be
+    sent — and the shop ran the promotion with an empty shelf for one pack.
+    """
+
+    A = "111058302001"
+    B = "111058302002"
+
+    def targets(self):
+        return [
+            SkuTarget(self.A, 200, group=self.A),
+            SkuTarget(self.B, 200, group=self.A),
+        ]
+
+    def run(self, stock, safety, **kwargs):
+        return compute_scenario(
+            "A",
+            ["S1"],
+            [1.0],
+            self.targets(),
+            stock,
+            safety_by_sku=safety,
+            **kwargs,
+        )
+
+    @staticmethod
+    def line(res, sku):
+        return next(ln for ln in res.lines if ln.sku == sku)
+
+    def test_the_empty_pack_is_topped_up_to_the_shop_safety(self):
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}}, {self.A: {"S1": 100}}
+        )
+        a = self.line(res, self.A)
+        assert a.need_qty == 100
+        assert a.dispatch_qty == 100
+        assert a.topup_qty == 100
+        assert a.safety_qty == 100
+        assert a.short_qty == 0
+        # The pack that already covers the group is left alone.
+        assert self.line(res, self.B).dispatch_qty == 0
+
+    def test_only_the_gap_to_the_floor_is_sent(self):
+        # 60 on hand against a floor of 100: 40 more, not another 100.
+        res = self.run(
+            {self.A: {"S1": 60}, self.B: {"S1": 450}}, {self.A: {"S1": 100}}
+        )
+        a = self.line(res, self.A)
+        assert a.need_qty == 40 and a.topup_qty == 40
+
+    def test_a_shop_already_at_the_floor_gets_nothing(self):
+        res = self.run(
+            {self.A: {"S1": 120}, self.B: {"S1": 450}}, {self.A: {"S1": 100}}
+        )
+        assert self.line(res, self.A).dispatch_qty == 0
+
+    def test_the_topup_rounds_up_to_the_sku_moq(self):
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}},
+            {self.A: {"S1": 100}},
+            moq_by_sku={self.A: 6},
+        )
+        assert self.line(res, self.A).dispatch_qty == 102
+
+    def test_pending_counts_towards_the_floor(self):
+        # 80 already on its way: the shop is 20 short of its 100, not 100.
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}},
+            {self.A: {"S1": 100}},
+            sales_by_sku={self.A: {"S1": ShopSales(pending_qty=80)}},
+            as_of=date(2026, 11, 17),
+        )
+        assert self.line(res, self.A).dispatch_qty == 20
+
+    def test_a_bigger_need_is_never_lowered_to_the_floor(self):
+        # Short of its own share by 200 while the floor is 100: keep the 200.
+        res = compute_scenario(
+            "A", ["S1"], [1.0], self.targets(), {self.A: {"S1": 0}},
+            safety_by_sku={self.A: {"S1": 100}},
+        )
+        a = self.line(res, self.A)
+        assert a.need_qty == 200 and a.topup_qty == 0
+
+    def test_no_safety_figure_means_no_topup(self):
+        res = self.run({self.A: {"S1": 0}, self.B: {"S1": 450}}, None)
+        assert sum(ln.dispatch_qty for ln in res.lines) == 0
+
+    def test_it_can_be_switched_off_for_a_run(self):
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}},
+            {self.A: {"S1": 100}},
+            group_topup=False,
+        )
+        assert sum(ln.dispatch_qty for ln in res.lines) == 0
+
+    def test_a_standalone_sku_is_not_topped_up(self):
+        # Without a group the floor does not apply: the SKU's own gap is its ask.
+        res = compute_scenario(
+            "A", ["S1"], [1.0], [SkuTarget("X", 100)], {"X": {"S1": 0}},
+            safety_by_sku={"X": {"S1": 50}},
+        )
+        x = self.line(res, "X")
+        assert x.need_qty == 100 and x.topup_qty == 0
+
+    def test_a_shop_without_a_share_is_not_opened_for_the_floor(self):
+        res = compute_scenario(
+            "A", ["S1", "S2"], [1.0, 0.0], self.targets(),
+            {self.A: {"S1": 0, "S2": 0}, self.B: {"S1": 450}},
+            safety_by_sku={self.A: {"S1": 100, "S2": 100}},
+        )
+        assert self.line(res, self.A).shop_code == "S1"
+        assert self.line(res, self.A).dispatch_qty == 100
+        assert not [ln for ln in res.lines if ln.shop_code == "S2" and ln.dispatch_qty]
+
+    def test_d001_pays_the_target_before_the_floor(self):
+        # One SKU, two shops: S2 needs its own 100 for the Target, S1 only a
+        # 100 floor. D001 has exactly 100 — the Target must win.
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            self.targets(),
+            {self.A: {"S1": 0}, self.B: {"S1": 400}},
+            warehouse_by_sku={self.A: 100, self.B: 1000},
+            safety_by_sku={self.A: {"S1": 100}},
+        )
+        s1 = next(ln for ln in res.lines if ln.sku == self.A and ln.shop_code == "S1")
+        s2 = next(ln for ln in res.lines if ln.sku == self.A and ln.shop_code == "S2")
+        assert s2.dispatch_qty == 100 and s2.short_qty == 0
+        assert s1.dispatch_qty == 0 and s1.short_qty == 100
+        assert s1.topup_qty == 100
+
+    def test_a_gated_shop_still_refuses_the_floor(self):
+        # A already covers its own share, so the only thing that would be sent
+        # is the floor — and the RP gate is not overruled by it.
+        res = compute_scenario(
+            "A", ["S1"], [1.0], self.targets(),
+            {self.A: {"S1": 250}, self.B: {"S1": 450}},
+            rp_by_sku={self.A: {"S1": "ND"}},
+            rp_gate_shops=["S1"],
+            safety_by_sku={self.A: {"S1": 300}},
+        )
+        a = self.line(res, self.A)
+        assert a.dispatch_qty == 0
+        assert a.blocked is True and a.blocked_qty == 50
+
+    def test_a_vendor_shop_gets_the_floor_as_a_po(self):
+        res = compute_scenario(
+            "A", ["S1"], [1.0], self.targets(),
+            {self.A: {"S1": 0}, self.B: {"S1": 450}},
+            supply_by_sku={self.A: {"S1": "1"}},
+            safety_by_sku={self.A: {"S1": 100}},
+        )
+        a = self.line(res, self.A)
+        assert a.vendor is True
+        assert a.po_qty == 100 and a.sto_qty == 0
+        assert a.topup_qty == 100
+
+    def test_the_floor_is_not_scaled_by_the_dispatch_window(self):
+        # A 14-day promotion sent for 4 days halves nothing here: Safety Stock
+        # is a standing shelf level, not a share of the promotion.
+        promo = PromoWindow(
+            start=date(2026, 11, 1), end=date(2026, 11, 14), dispatch_days=4
+        )
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}},
+            {self.A: {"S1": 100}},
+            promo=promo,
+            as_of=date(2026, 11, 17),
+        )
+        a = self.line(res, self.A)
+        assert a.dispatch_qty == 100
+        assert a.topup_qty == 100
+
+    def test_the_summary_and_warning_carry_the_topup(self):
+        res = self.run(
+            {self.A: {"S1": 0}, self.B: {"S1": 450}}, {self.A: {"S1": 100}}
+        )
+        assert next(s for s in res.skus if s.sku == self.A).topup_qty == 100
+        assert any("貨組補底" in w for w in res.warnings)
+
+
 class TestSupplySource:
     """1／4 行貨 is a PO for the buyer; 2 倉貨 is an STO from D001."""
 
@@ -1060,3 +1245,150 @@ class TestSurplus:
         assert res.skus[0].surplus_qty == 100
         assert by_shop["V1"].alloc_qty == 700
         assert by_shop["V1"].surplus_qty == 0  # dead stock, still not pullable
+
+
+class TestTransferSuggestions:
+    """建議調貨 is advice, and it stops at the OM boundary.
+
+    It never changes a dispatch number: the short shop keeps its 缺貨 and its
+    STO. It exists because a transfer notice takes 4–7 days, so the operator
+    has to decide whether the wait is worth it — hence off by default.
+    """
+
+    def _run(self, shops, stock, warehouse, om, target=100, shares=None, **kwargs):
+        shares = shares or [1.0 / len(shops)] * len(shops)
+        return compute_scenario(
+            "A",
+            list(shops),
+            list(shares),
+            [SkuTarget("K", target)],
+            stock,
+            warehouse_by_sku=warehouse,
+            om_by_shop=om,
+            suggest_transfer=True,
+            **kwargs,
+        )
+
+    def test_pairs_a_short_shop_with_a_spare_one_in_the_same_om(self):
+        res = self._run(
+            ["S1", "S2", "S3", "S4"],
+            {"K": {"S1": 0, "S2": 100, "S3": 0, "S4": 100}},
+            {"K": 0},
+            {"S1": "OM 1", "S2": "OM 1", "S3": "OM 2", "S4": "OM 2"},
+        )
+        assert [(t.from_shop, t.to_shop, t.qty, t.om) for t in res.transfers] == [
+            ("S2", "S1", 25, "OM 1"),
+            ("S4", "S3", 25, "OM 2"),
+        ]
+
+    def test_never_crosses_into_another_om(self):
+        # The only spare sits in OM 2, the shortage in OM 1: no suggestion.
+        res = self._run(
+            ["S1", "S2"],
+            {"K": {"S1": 0, "S2": 100}},
+            {"K": 0},
+            {"S1": "OM 1", "S2": "OM 2"},
+        )
+        assert res.transfers == []
+
+    def test_a_blank_om_is_never_paired(self):
+        res = self._run(
+            ["S1", "S2"],
+            {"K": {"S1": 0, "S2": 100}},
+            {"K": 0},
+            {"S1": "", "S2": ""},
+        )
+        assert res.transfers == []
+        assert any("沒有 OM" in w for w in res.warnings)
+
+    def test_nothing_to_suggest_when_the_warehouse_covers_the_need(self):
+        res = self._run(
+            ["S1", "S2"],
+            {"K": {"S1": 0, "S2": 100}},
+            {"K": 50},
+            {"S1": "OM 1", "S2": "OM 1"},
+        )
+        assert res.skus[0].short_qty == 0
+        assert res.transfers == []
+
+    def test_a_partial_warehouse_shortage_is_enough(self):
+        # D001 has 60 of the 100 asked for: not zero, but still short.
+        res = self._run(
+            ["S1", "S2", "S3"],
+            {"K": {"S1": 0, "S2": 0, "S3": 100}},
+            {"K": 60},
+            {"S1": "OM 1", "S2": "OM 1", "S3": "OM 1"},
+            target=150,
+        )
+        assert res.skus[0].short_qty == 40
+        assert [(t.from_shop, t.to_shop, t.qty) for t in res.transfers] == [
+            ("S3", "S1", 20),
+            ("S3", "S2", 20),
+        ]
+
+    def test_one_spare_shop_can_cover_several_destinations(self):
+        res = self._run(
+            ["S1", "S2", "S3"],
+            {"K": {"S1": 0, "S2": 0, "S3": 100}},
+            {"K": 0},
+            {"S1": "OM 1", "S2": "OM 1", "S3": "OM 1"},
+            target=120,
+        )
+        assert [(t.from_shop, t.to_shop, t.qty) for t in res.transfers] == [
+            ("S3", "S1", 40),
+            ("S3", "S2", 20),
+        ]
+
+    def test_vendor_shops_are_out_of_scope_at_both_ends(self):
+        res = self._run(
+            ["W1", "V1"],
+            {"K": {"W1": 0, "V1": 300}},
+            {"K": 0},
+            {"W1": "OM 1", "V1": "OM 1"},
+            supply_by_sku={"K": {"W1": "2", "V1": "1"}},
+        )
+        assert res.transfers == []
+
+    def test_off_unless_asked_for(self):
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            [SkuTarget("K", 100)],
+            {"K": {"S1": 0, "S2": 100}},
+            warehouse_by_sku={"K": 0},
+            om_by_shop={"S1": "OM 1", "S2": "OM 1"},
+        )
+        assert res.transfers == []
+
+    def test_quantity_follows_the_gap_not_the_moq(self):
+        # A shop-to-shop move is not a purchase order, so MOQ does not apply.
+        from app.calc import Line, suggest_transfers
+
+        lines = [
+            Line(
+                sku="K",
+                shop_code="S1",
+                share_pct=0.5,
+                alloc_qty=10,
+                stock_qty=0,
+                gap_qty=10,
+                dispatch_qty=0,
+                surplus_qty=0,
+                need_qty=7,
+                short_qty=7,
+            ),
+            Line(
+                sku="K",
+                shop_code="S2",
+                share_pct=0.5,
+                alloc_qty=10,
+                stock_qty=30,
+                gap_qty=-20,
+                dispatch_qty=0,
+                surplus_qty=20,
+            ),
+        ]
+        out = suggest_transfers(lines, {"S1": "OM 1", "S2": "OM 1"})
+        assert [(t.from_shop, t.to_shop, t.qty) for t in out] == [("S2", "S1", 7)]
+

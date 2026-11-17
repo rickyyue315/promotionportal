@@ -209,6 +209,75 @@ def _shared_demo(client: TestClient) -> str:
     return resp.headers["location"].rstrip("/").split("/")[-1]
 
 
+def _topup_demo(client: TestClient) -> str:
+    """A covered group whose empty pack is lifted to the shop's Safety Stock."""
+    from openpyxl import Workbook
+
+    period = "2027-03"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shares"
+    ws.append(["Shop", "店舖名稱", "A"])
+    ws.append(["HA01", "HA01 門市", 0.6])
+    ws.append(["HA02", "HA02 門市", 0.4])
+    buf = io.BytesIO()
+    wb.save(buf)
+    client.post(
+        "/admin/shares/import",
+        data={"period": period},
+        files={"file": ("shares.xlsx", buf.getvalue())},
+        follow_redirects=False,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "HYDRA-AZ FACE MASK, N/A, 7PC", 400])
+    ws.append(["111058302002", "HYDRA-AZ FACE MASK, N/A, 14PC", None])
+    ws.merge_cells("C2:C3")
+    tbuf = io.BytesIO()
+    wb.save(tbuf)
+
+    # HA01 already holds 450 of the 7PC — more than the whole group target — but
+    # none of the 14PC. Without the floor nothing would be sent there.
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        ["Article", "Site", "SaSa Net Stock", "Last Month Sold Qty",
+         "MTD Sold Qty", "MOQ", "Safety Stock"]
+    )
+    rows = [
+        ("111058302001", "HA01", 450, 800, 200, 6, 0),
+        ("111058302002", "HA01", 0, 200, 50, 6, 100),
+        ("111058302001", "HA02", 0, 480, 120, 6, 0),
+        ("111058302002", "HA02", 0, 120, 30, 6, 60),
+        ("111058302001", "D001", 300, 0, 0, 6, 0),
+        ("111058302002", "D001", 300, 0, 0, 6, 0),
+    ]
+    for row in rows:
+        ws.append(list(row))
+    sbuf = io.BytesIO()
+    wb.save(sbuf)
+
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-03-01",
+            "promo_end": "2027-03-04",
+            "dispatch_days": "4",
+            "group_topup": "1",
+        },
+        files={
+            "target_file": ("target.xlsx", tbuf.getvalue()),
+            "stock_file": ("stock.xlsx", sbuf.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    return resp.headers["location"].rstrip("/").split("/")[-1]
+
+
 def _supply_demo(client: TestClient) -> str:
     """One 行貨 shop among 倉貨 shops: PO worklist next to the STO dispatch."""
     from openpyxl import Workbook
@@ -281,6 +350,74 @@ def _supply_demo(client: TestClient) -> str:
     return resp.headers["location"].rstrip("/").split("/")[-1]
 
 
+def _transfer_demo(client: TestClient) -> str:
+    """D001 empty, one 盈餘 shop and one 缺貨 shop per OM: the 建議調貨 table."""
+    from openpyxl import Workbook
+
+    period = "2027-09"
+    sku = "111058302009"
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Shares"
+    ws.append(["Region", "OM", "Site", "店舖名稱", "A"])
+    ws.append(["HK", "OM 1", "HA01", "HA01 缺貨店", 0.25])
+    ws.append(["HK", "OM 1", "HA02", "HA02 盈餘店", 0.25])
+    ws.append(["HK", "OM 2", "HA03", "HA03 缺貨店", 0.25])
+    ws.append(["HK", "OM 2", "HA04", "HA04 盈餘店", 0.25])
+    buf = io.BytesIO()
+    wb.save(buf)
+    client.post(
+        "/admin/shares/import",
+        data={"period": period},
+        files={"file": ("shares.xlsx", buf.getvalue())},
+        follow_redirects=False,
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "保濕面膜 10片", 400])
+    tbuf = io.BytesIO()
+    wb.save(tbuf)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(
+        ["Article", "Site", "Supply source", "RP Type", "SaSa Net Stock", "MOQ"]
+    )
+    # D001 is empty and each OM keeps its spare in one shop, so the only way to
+    # cover the shortage is a shop-to-shop move inside the same OM.
+    rows = [
+        (sku, "D001", "2", "ND", 0, 1),
+        (sku, "HA01", "2", "RF", 0, 1),
+        (sku, "HA02", "2", "RF", 400, 1),
+        (sku, "HA03", "2", "RF", 0, 1),
+        (sku, "HA04", "2", "RF", 300, 1),
+    ]
+    for row in rows:
+        ws.append(list(row))
+    sbuf = io.BytesIO()
+    wb.save(sbuf)
+
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-09-01",
+            "promo_end": "2027-09-04",
+            "dispatch_days": "4",
+            "suggest_transfer": "1",
+        },
+        files={
+            "target_file": ("target.xlsx", tbuf.getvalue()),
+            "stock_file": ("stock.xlsx", sbuf.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    return resp.headers["location"].rstrip("/").split("/")[-1]
+
+
 def main() -> None:
     samples = ROOT / "samples"
     with TestClient(app) as c:
@@ -302,6 +439,9 @@ def main() -> None:
                 "promo_end": "2026-11-29",
                 "dispatch_days": "4",
                 "date_source": "manual",
+                # On for the screenshot so the 建議調貨 block is visible; the
+                # checkbox is off by default in the real form.
+                "suggest_transfer": "1",
             },
             files={
                 "target_file": ("t.xlsx", (samples / "sample_target.xlsx").read_bytes()),
@@ -346,6 +486,27 @@ def main() -> None:
             f"/run/{supply_run}/detail?scenario=A&sku=111058302001",
             "16_detail_supply",
             1300,
+        )
+
+        # 貨組補底: a shop that already covers the group still gets its empty
+        # pack lifted to the Safety Stock.
+        topup_run = _topup_demo(c)
+        shoot(c, f"/run/{topup_run}", "17_result_topup", 1500)
+        shoot(
+            c,
+            f"/run/{topup_run}/detail?scenario=A&sku=111058302002",
+            "18_detail_topup",
+            1300,
+        )
+
+        # 建議調貨: the same OM's spare stock covers its own shortage.
+        transfer_run = _transfer_demo(c)
+        shoot(c, f"/run/{transfer_run}", "19_result_transfer", 1500)
+        shoot(
+            c,
+            f"/run/{transfer_run}/detail?scenario=A&sku=111058302009",
+            "20_detail_transfer",
+            1400,
         )
 
     # login page has no session

@@ -118,7 +118,7 @@
               <td class="num">{{ ln.stock_qty | num }}</td>
               <td class="num">{{ ln.pending_qty | num }}</td>
               <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
-              <td class="num">{{ ln.need_qty | num }}</td>
+              <td class="num">{{ ln.need_qty | num }}{% if ln.topup_qty %}<span class="badge neutral" style="margin-left:4px" title="其中 {{ ln.topup_qty | num }} 件屬 Safety 補底：該店可用量 {{ (ln.stock_qty + ln.pending_qty) | num }} 件，低於 Safety Stock {{ ln.safety_qty | num }} 件，補派至 Safety 水平（按 MOQ 進位）">補底 {{ ln.topup_qty | num }}</span>{% endif %}</td>
               <td class="num">
                 {% if ln.dispatch_qty %}
                   {% if ln.vendor %}
@@ -157,6 +157,50 @@
           </tfoot>
         </table>
       </div>
+      {% if transfers %}
+      <div style="border-top:1px solid var(--border);background:var(--surface-2);padding:14px 16px">
+        <div style="display:flex;align-items:baseline;gap:10px;flex-wrap:wrap;margin-bottom:9px">
+          <strong style="font-size:13.5px">建議調貨（只限同一個 OM）</strong>
+          <span class="dim" style="font-size:12px">
+            共 {{ transfers | sum(attribute='qty') | num }} 件 · {{ transfers | length }} 組
+          </span>
+          <span class="badge warn">參考・非指示</span>
+        </div>
+        <div class="table-wrap" style="background:var(--surface);border:1px solid var(--border);border-radius:8px">
+          <table class="tbl">
+            <thead>
+              <tr>
+                <th>OM</th>
+                <th>出貨店舖</th>
+                <th>收貨店舖</th>
+                <th class="num">建議數量</th>
+              </tr>
+            </thead>
+            <tbody>
+            {% for t in transfers %}
+              <tr>
+                <td><span class="badge neutral">{{ t.om }}</span></td>
+                <td><span class="mono strong">{{ t.from_shop }}</span>
+                  {% if shop_names.get(t.from_shop) %}<span class="dim" style="margin-left:6px;font-size:11.5px">{{ shop_names.get(t.from_shop) }}</span>{% endif %}</td>
+                <td><span class="mono strong">{{ t.to_shop }}</span>
+                  {% if shop_names.get(t.to_shop) %}<span class="dim" style="margin-left:6px;font-size:11.5px">{{ shop_names.get(t.to_shop) }}</span>{% endif %}</td>
+                <td class="num"><span class="badge warn">{{ t.qty | num }}</span></td>
+              </tr>
+            {% endfor %}
+            </tbody>
+          </table>
+        </div>
+        <p class="dim" style="font-size:12.5px;margin:9px 0 0">
+          這是<strong>附屬建議</strong>，不會改變上面的「可派」與「缺貨」：開 PO／開 STO 照舊要做。
+          調貨通知一般 4–7 日，推廣開始前未必完成程序。只配對同一個 OM 內「可調出」的盈餘——
+          行貨店舖不參與，OM 留空的店舖亦不會被配對；數量按實際缺口，不按 MOQ 進位。
+        </p>
+      </div>
+      {% elif params.suggest_transfer %}
+      <div style="border-top:1px solid var(--border);background:var(--surface-2);padding:12px 16px;font-size:12.5px;color:var(--muted)">
+        已開啟建議調貨，但這個 SKU 沒有可配對的同一個 OM 盈餘（或 D001 夠派，不需調貨）。
+      </div>
+      {% endif %}
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
         「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；
         「可派」受 D001 倉存限制，不足時按需求比例分配（只計倉貨店舖）。
@@ -172,6 +216,11 @@
         <br>這個 SKU 屬共用 Target 貨組 <strong>{{ selected.group }}</strong>，上面的 Target 是它在組內分到的份額；
         每店需求會與組內其他 SKU 一併封頂，兩邊不會就同一批缺貨各派一次。
         所以「差距」大於 0 但「需求」是 0，代表那個缺口已由組內另一個包裝在該店的存貨抵銷。
+        {% if params.group_topup %}
+        <br>但有勾選<strong>貨組補底</strong>：封頂之後，如果某間店的可用量（現有＋在途）仍低於該 SKU 的
+        <span class="mono">Safety Stock</span>，會補派至 Safety 水平（按 MOQ 進位）—— 「需求」旁邊的
+        「補底」標籤就是這部分，Target 並沒有要求。補底不按派貨日數縮小，D001 不夠派時排最後。
+        {% endif %}
         {% endif %}
         {% if gate %}{{ gate | join('、') }} 只有 RP Type = RF 才會派貨，ND 或未提供一律 0 件。{% endif %}
         {% if supply.codes %}

@@ -98,6 +98,17 @@ CONSIGN_KEYS = (
 RP_KEYS = ("rp type", "rp_type", "rp code", "rp")
 SUPPLY_KEYS = ("supply source", "supply_source", "supplysource", "source of supply", "貨源", "供應來源")
 PENDING_KEYS = ("pending received", "pending", "在途")
+# Safety Stock is not stock — it is the shop's minimum, used only as the floor
+# a shared target's member is topped up to (see calc's "Safety floor for a
+# group"). Kept apart from STOCK_KEYS, which reject the word "safety".
+SAFETY_KEYS = (
+    "safety stock",
+    "safety stock qty",
+    "safety",
+    "安全存量",
+    "安全庫存",
+    "安全量",
+)
 LAST_MONTH_KEYS = ("last month sold qty", "last month sold", "上月銷量", "上月銷售")
 MTD_KEYS = ("mtd sold qty", "mtd sold", "本月銷量", "本月銷售")
 LAUNCH_KEYS = ("launch date", "上市日期", "推出日期")
@@ -224,6 +235,8 @@ class StockRow:
     row rather than on the target list. ``supply_source`` says who supplies the
     shop — 1／4 行貨 (buyer's PO; 4 is booked through D001 but is still vendor
     stock), 2 倉貨 (STO from D001) — so the row can be routed correctly.
+    ``safety`` is the shop's ``Safety Stock``: never treated as stock, only as
+    the floor a member of a shared target is topped up to.
     """
 
     sku: str
@@ -236,6 +249,7 @@ class StockRow:
     launch_date: Optional[date] = None
     moq: int = 1
     supply_source: str = ""
+    safety: int = 0
 
 
 @dataclass(frozen=True)
@@ -561,6 +575,11 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
     i_supply = _find(
         headers, SUPPLY_KEYS, exclude={i_sku, i_shop, i_stock, i_rp, i_moq}
     )
+    i_safety = _find(
+        headers,
+        SAFETY_KEYS,
+        exclude={i_sku, i_shop, i_stock, i_consign, i_moq},
+    )
 
     # Is it a wide pivot (one column per shop)?
     shop_cols = [
@@ -617,6 +636,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
             "launch_date": original[i_launch] if i_launch is not None else "",
             "moq": original[i_moq] if i_moq is not None else "",
             "supply_source": original[i_supply] if i_supply is not None else "",
+            "safety": original[i_safety] if i_safety is not None else "",
         }
         out.warnings.append("偵測為長表格式（每行一個 SKU × 店舖）")
         pairs2: Dict[Tuple[str, str], int] = {}
@@ -626,6 +646,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
         sales_map: Dict[Tuple[str, str], Tuple[int, int]] = {}
         launch_map: Dict[Tuple[str, str], date] = {}
         moq_map: Dict[Tuple[str, str], int] = {}
+        safety_map: Dict[Tuple[str, str], int] = {}
         supply_map: Dict[Tuple[str, str], str] = {}
         supply_conflict = set()
         dup2 = set()
@@ -691,6 +712,16 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
                 # Repeated on every site of the same SKU; the largest wins so a
                 # stray 1 on one row cannot cancel the real minimum.
                 moq_map[key] = max(moq_map.get(key, 1), int(round(m)))
+
+            s = (
+                to_number(row[i_safety])
+                if i_safety is not None and i_safety < len(row)
+                else None
+            )
+            if s and s > 0:
+                # Also repeated per row; the largest wins, for the same reason
+                # as MOQ — a blank on one line must not cancel the real floor.
+                safety_map[key] = max(safety_map.get(key, 0), int(round(s)))
 
             if i_rp is not None and i_rp < len(row):
                 rp = str(row[i_rp] or "").strip().upper()
@@ -760,6 +791,7 @@ def parse_stock_file(data: bytes, known_shops: Optional[set] = None) -> Parsed:
                 launch_date=launch_map.get((sku, shop)),
                 moq=moq_map.get((sku, shop), 1),
                 supply_source=supply_map.get((sku, shop), ""),
+                safety=safety_map.get((sku, shop), 0),
             )
             for (sku, shop), qty in pairs2.items()
         ]
@@ -942,6 +974,21 @@ def _tinted(
     return cell
 
 
+def _commented(ws, value: Any, text: str, author: str = "派貨計算") -> WriteOnlyCell:
+    """A write-only cell with a hover note.
+
+    The default font is set on purpose: in write-only mode openpyxl reuses one
+    cell object for a whole row and only replaces it when the previous cell has
+    a style, so a comment on a plain cell would show up on every cell to its
+    right. ``Font()`` is the default font — nothing changes on screen, and the
+    note stays on its own cell.
+    """
+    cell = WriteOnlyCell(ws, value=value)
+    cell.font = Font()
+    cell.comment = Comment(text, author)
+    return cell
+
+
 def _put_header(
     ws, headers: Sequence[str], notes: Optional[Dict[int, str]] = None
 ) -> None:
@@ -1048,12 +1095,27 @@ def _target_heads(params: dict) -> Tuple[str, str]:
 _DETAIL_WIDTHS = {
     "A": 13, "B": 16, "C": 38, "D": 8, "E": 24, "F": 7, "G": 9, "H": 10,
     "I": 8, "J": 16, "K": 16, "L": 9, "M": 7, "N": 7, "O": 7, "P": 7,
-    "Q": 8, "R": 10, "S": 12, "T": 8, "U": 8, "V": 9, "W": 9, "X": 9,
-    "Y": 22,
+    "Q": 10, "R": 8, "S": 8, "T": 10, "U": 12, "V": 8, "W": 8, "X": 9,
+    "Y": 9, "Z": 9, "AA": 22,
 }
 
 
-def _detail_layout(ws, last_row: int) -> None:
+def _transfer_layout(ws, last_row: int, n_cols: int) -> None:
+    """Header frozen, filter on, shop columns wide enough for a name.
+
+    The sheet is handed to the shops, so 出貨店舖／收貨店舖 carry both the code
+    and the name; a bare "HA19" is not enough to act on.
+    """
+    ws.freeze_panes = "A2"
+    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last_row}"
+    for col, width in {
+        "A": 8, "B": 15, "C": 38, "D": 10, "E": 12, "F": 24,
+        "G": 12, "H": 24, "I": 14,
+    }.items():
+        ws.column_dimensions[col].width = width
+
+
+def _detail_layout(ws, last_row: int, n_cols: int) -> None:
     """Freeze the identifying columns, filter the header, size the columns.
 
     A frozen header and auto-filter are what the shop-by-shop sheets are used
@@ -1061,7 +1123,9 @@ def _detail_layout(ws, last_row: int) -> None:
     """
     # A–E: Brand Code, SKU, 貨品名稱, 店舖, 店舖名稱.
     ws.freeze_panes = "F2"
-    ws.auto_filter.ref = f"A1:Y{last_row}"
+    # The range follows the header itself, so adding a column cannot leave the
+    # filter one letter short of the last one.
+    ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last_row}"
     ws.row_dimensions[1].height = 45
     for col, width in _DETAIL_WIDTHS.items():
         ws.column_dimensions[col].width = width
@@ -1168,12 +1232,14 @@ def export_run(
         ]
         po_cols: List[int] = []
         short_cols: List[int] = []
+        dispatch_cols: List[Tuple[int, int]] = []
         for sc in scenarios:
             s = row["scenarios"].get(sc)
             # Remember where the two action columns land: the block repeats per
             # scenario, so their positions move with the scenario count.
             po_cols.append(len(line) + 2)
             short_cols.append(len(line) + 3)
+            dispatch_cols.append((len(line) + 1, s.topup_qty if s else 0))
             line += [
                 s.need_qty if s else 0,
                 s.total_dispatch if s else 0,
@@ -1186,8 +1252,19 @@ def export_run(
             # The rows are split apart, so the one number the buyer wrote would
             # otherwise vanish. A hover note keeps the link without adding a
             # column that would repeat on every member row.
-            cells[1] = WriteOnlyCell(ws, row["sku"])
-            cells[1].comment = Comment(group_note, "派貨計算")
+            cells[1] = _commented(ws, row["sku"], group_note)
+        for idx, topup in dispatch_cols:
+            if topup:
+                # The comparison sheet has no 補底 column: the dispatch is the
+                # number the buyer acts on, and a note says how much of it the
+                # Target never asked for.
+                cells[idx] = _commented(
+                    ws,
+                    line[idx],
+                    f"需求中有 {topup:,} 件屬 Safety 補底：貨組成員在該店的可用量"
+                    "（現有＋在途）低於 Safety Stock，補派至 Safety 水平；"
+                    "派貨不足時這部分照樣計入缺貨",
+                )
         for idx in po_cols:
             if line[idx]:
                 cells[idx] = _tinted(ws, line[idx], _PO_FILL)
@@ -1207,11 +1284,11 @@ def export_run(
             "Brand Code", "SKU", "貨品名稱", "店舖", "店舖名稱", "貨源",
             "Supply Source", "分配基準", "佔比",
             full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
-            "需求", "可派 STO", "開 PO（全期）", "缺貨",
+            "Safety Stock", "補底", "需求", "可派 STO", "開 PO（全期）", "缺貨",
             "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
         ]
         # Before the header row, for the same reason as the comparison sheet.
-        _detail_layout(ws2, 1 + len(res.lines))
+        _detail_layout(ws2, 1 + len(res.lines), len(detail_heads))
         _put_header(ws2, detail_heads, {1: _legend_note(sc, labels.get(sc) or {})})
         moq_of = {s.sku: s.moq for s in res.skus}
         # Name and brand per SKU, not per comparison row: a shared target used
@@ -1220,9 +1297,9 @@ def export_run(
         brand_of = {s.sku: s.brand for s in res.skus}
         desc_of = {s.sku: s.description for s in res.skus}
         names = params.get("shop_names") or {}
-        # Positions of the three action columns in the row list below: 需求 (16)
-        # is the rounded need, 可派 STO (17), 開 PO（全期）(18), 缺貨 (19).
-        _STO_COL, _PO_COL, _SHORT_COL = 17, 18, 19
+        # Positions of the three action columns in the row list below: 需求 (19)
+        # is the rounded need, 可派 STO (20), 開 PO（全期）(21), 缺貨 (22).
+        _STO_COL, _PO_COL, _SHORT_COL = 19, 20, 21
         for ln in res.lines:
             reason = ""
             if ln.blocked:
@@ -1246,6 +1323,8 @@ def export_run(
                 ln.on_hand,
                 ln.gap_qty,
                 moq_of.get(ln.sku, 1),
+                ln.safety_qty,
+                ln.topup_qty,
                 ln.need_qty,
                 ln.sto_qty,
                 ln.po_qty,
@@ -1268,6 +1347,47 @@ def export_run(
                     ws2, ln.short_qty, _SHORT_FILL, font=_SHORT_FONT
                 )
             ws2.append(values)
+
+    # --- transfer suggestions (only when the run asked for them) ---
+    if params.get("suggest_transfer"):
+        names = params.get("shop_names") or {}
+        transfer_rows: List[List[Any]] = []
+        for sc in scenarios:
+            res = results.get(sc)
+            if not res:
+                continue
+            desc_of = {s.sku: s.description for s in res.skus}
+            for t in res.transfers:
+                transfer_rows.append(
+                    [
+                        sc,
+                        t.sku,
+                        desc_of.get(t.sku, ""),
+                        t.om,
+                        t.from_shop,
+                        names.get(t.from_shop, ""),
+                        t.to_shop,
+                        names.get(t.to_shop, ""),
+                        t.qty,
+                    ]
+                )
+        if transfer_rows:
+            wst = wb.create_sheet("調貨建議")
+            transfer_heads = [
+                "餐別", "SKU", "貨品名稱", "OM", "出貨店舖", "出貨店名稱",
+                "收貨店舖", "收貨店名稱", "建議調貨數量",
+            ]
+            _transfer_layout(wst, 1 + len(transfer_rows), len(transfer_heads))
+            _put_header(
+                wst,
+                transfer_heads,
+                {
+                    8: "附屬建議，不是指示：只限同一個 OM、只在 D001 不足派時提供；"
+                    "調貨通知一般 4–7 日，未必趕及推廣開始，不能代替開 PO／開 STO"
+                },
+            )
+            for row in transfer_rows:
+                wst.append(row)
 
     # --- parameters ---
     ws3 = wb.create_sheet("參數")
@@ -1293,6 +1413,26 @@ def export_run(
         # The comparison sheet shows a shared target as one row; this is where
         # the per-SKU split behind that row can be checked.
         ws3.append(["共用 Target", note])
+    if params.get("group_topup"):
+        ws3.append(
+            [
+                "貨組補底",
+                "貨組成員在該店的可用量（現有庫存＋在途）低於 Safety Stock 時，"
+                "補派至 Safety 水平，按 MOQ 進位；補底不按派貨日數縮小、"
+                "只限貨組成員，D001 不夠派時先滿足正常需求",
+            ]
+        )
+    elif params.get("group_topup") is False:
+        ws3.append(["貨組補底", "未套用（計算時未勾選）"])
+    if params.get("group_topup"):
+        ws3.append(
+            [
+                "Safety Stock 來源",
+                "庫存檔的 Safety Stock 欄（每個 SKU × 店舖）"
+                if params.get("has_safety")
+                else "庫存檔沒有 Safety Stock 欄，所以實際上沒有補底",
+            ]
+        )
     if params.get("promo_start"):
         ws3.append(["推廣開始", params.get("promo_start", "")])
         ws3.append(["推廣完結", params.get("promo_end", "")])
@@ -1347,6 +1487,24 @@ def export_run(
             "D001 有貨就由 D001 出，不叫店舖調出。行貨店舖不計，調撥由 Buyer 在另一個系統安排",
         ]
     )
+    if params.get("suggest_transfer"):
+        ws3.append(
+            [
+                "建議調貨",
+                "已開啟：只在 D001 不足派時，為同一個 OM 的店舖配對「有盈餘 → 缺貨」，"
+                "數量按實際缺口、不按 MOQ 進位；調貨通知一般 4–7 日，"
+                "未必趕及推廣開始，不能代替開 PO／開 STO",
+            ]
+        )
+        if not params.get("has_om"):
+            ws3.append(
+                [
+                    "建議調貨 OM",
+                    "店舖主檔全部沒有 OM，所以沒有配對；請先到店舖主檔填 OM",
+                ]
+            )
+    else:
+        ws3.append(["建議調貨", "未開啟（預設）"])
     if params.get("has_sales") is False:
         ws3.append(["銷售數據", "庫存檔沒有銷售欄位，未計算預計銷量與差距"])
     if params.get("has_moq") is False:
@@ -1535,6 +1693,12 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["或改成三欄長表：SKU / 店舖 / 庫存，系統會自動辨識"])
     note.append(["長表可加一欄 RP Type（例如 ND / RF）；HB87 只有 RF 才派貨，其餘店舖不看這欄"])
     note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
+    note.append(
+        [
+            "長表可加一欄 Safety Stock；只用作共用 Target（貨組）的補底線，"
+            "不會當作存貨。沒有這一欄就沒有補底",
+        ]
+    )
     note.append(
         [
             "長表可加一欄 Supply Source；1／4 是行貨（Buyer 開 PO，不佔 D001 倉存；"

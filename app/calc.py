@@ -117,6 +117,31 @@ How it is calculated:
 The split only decides how the group target is *reported* per member; the
 per-shop cap is what keeps the dispatch honest. Without it, two members that
 each look short in a shop would both receive stock for the same missing units.
+
+Safety floor for a group
+------------------------
+Judging the group as a whole is right for the target, but it can leave one pack
+with nothing on the shelf: a shop holding 450 of the 7PC and none of the 14PC
+already covers a group target of 400, so neither pack is sent — and a two-pack
+promotion cannot run from one empty shelf (user, 2026-11-17).
+
+So every member of a group also gets a floor. If the shop's on-hand for that SKU
+(``stock + pending``) is below the SKU's ``Safety Stock`` for that shop, the shop
+is topped up to that level once:
+
+    topup = round_up_to(max(safety - on_hand, 0), MOQ)
+
+The floor is a floor, never a quantity: a shop already at or above its safety
+level gets nothing extra, and a need that is already larger is left alone. It is
+deliberately narrow — only members of a group (a standalone SKU's shortage shows
+up as its own gap anyway), only shops carrying a share of the SKU, and only when
+the run asks for it (``group_topup``), because these units are sent on top of
+what the Target asks for.
+
+D001 still pays for them last: base needs are capped first, and a top-up only
+receives what is left. The alternative — one proportional pool — would quietly
+cut a shop's Target dispatch to fund another shop's floor. A gated shop keeps
+its refusal: the units are reported as blocked rather than dispatched.
 """
 
 from __future__ import annotations
@@ -217,6 +242,11 @@ class Line:
     expected_sales: int = 0
     need_qty: int = 0
     short_qty: int = 0
+    # The shop's Safety Stock for this SKU, and how much of the need exists only
+    # because of it (see "Safety floor for a group" above). ``topup_qty`` is the
+    # part of ``need_qty`` that the Target did not ask for.
+    safety_qty: int = 0
+    topup_qty: int = 0
     supply_source: str = ""
     supply_mode: str = SUPPLY_WAREHOUSE
     po_qty: int = 0
@@ -270,6 +300,9 @@ class SkuSummary:
     group: str = ""
     po_qty: int = 0
     po_target: int = 0
+    # Units of the need that exist only because of the group's Safety floor —
+    # what the Target never asked for.
+    topup_qty: int = 0
     brand: str = ""
 
     @property
@@ -291,6 +324,23 @@ class SkuSummary:
         return bool(self.group) and self.group == self.sku
 
 
+@dataclass(frozen=True)
+class Transfer:
+    """A suggested shop-to-shop movement of one SKU, inside a single OM.
+
+    Advice only: the shops still get their STO/PO numbers, and the transfer is
+    an alternative for whoever can wait out the 4–7 day transfer notice. The
+    same OM is the hard constraint — an OM looks after its own shops' stock, so
+    a suggestion never crosses into another OM's territory.
+    """
+
+    sku: str
+    om: str
+    from_shop: str
+    to_shop: str
+    qty: int
+
+
 @dataclass
 class ScenarioResult:
     scenario: str
@@ -298,6 +348,7 @@ class ScenarioResult:
     skus: List[SkuSummary]
     share_total: float
     warnings: List[str] = field(default_factory=list)
+    transfers: List[Transfer] = field(default_factory=list)
 
     @property
     def n_sku(self) -> int:
@@ -682,6 +733,49 @@ def _cap_group_needs(prepared: Sequence[dict], n_shops: int) -> None:
                     row["need"] = qty
 
 
+def _apply_group_topup(prepared: Sequence[dict], n_shops: int) -> None:
+    """Give every shop a Safety floor on each member of a shared target.
+
+    The group cap deliberately stops at what the group as a whole lacks, which
+    is why a shop holding one pack can leave its sibling pack at zero. This pass
+    raises such a row to the shop's own Safety Stock for that SKU:
+
+        want = round_up_to(max(safety - (stock + pending), 0), MOQ)
+
+    Only the raise is recorded as ``topup`` — the part of the need the Target
+    never asked for — so the report can say how much of a dispatch is 補底.
+    """
+    groups: Dict[str, List[dict]] = {}
+    for item in prepared:
+        key = item["target"].group
+        if key:
+            groups.setdefault(key, []).append(item)
+
+    for items in groups.values():
+        if len(items) < 2:
+            continue
+        for index in range(n_shops):
+            for item in items:
+                row = item["rows"][index]
+                # A shop with no share of this SKU is not a candidate for its
+                # stock; the floor tops up shelves, it does not open new ones.
+                if row["share"] <= 0 or row["safety"] <= 0:
+                    continue
+                on_hand = row["stock"] + row["pending"]
+                want = round_up_to(max(row["safety"] - on_hand, 0), item["moq"])
+                if want <= row["need"]:
+                    continue
+                row["topup"] = want - row["need"]
+                row["need"] = want
+                if row["gated"]:
+                    # The RP rule is not overruled by the floor: the units are
+                    # shown as blocked so the buyer sees what the gate costs.
+                    row["blocked"] = True
+                    item["candidates"][index] = 0
+                else:
+                    item["candidates"][index] = want
+
+
 def _apply_group_coverage(
     skus: Sequence[SkuSummary], targets: Sequence[SkuTarget]
 ) -> List[SkuSummary]:
@@ -723,6 +817,95 @@ def _apply_group_coverage(
     return out
 
 
+def suggest_transfers(
+    lines: Sequence[Line],
+    om_by_shop: Optional[Dict[str, str]] = None,
+) -> List[Transfer]:
+    """Pair a short shop with a shop holding spare stock, inside one OM.
+
+    This is advice layered on top of the dispatch, never a replacement for it:
+    the short shop still gets its STO figure and the shortage is still counted.
+    A transfer notice takes 4–7 days, so it may not land before the promotion
+    starts — which is why the caller only computes this when asked.
+
+    The rules, in order:
+
+    * only for a SKU the warehouse could not fully cover (any line is short);
+    * only 倉貨 rows — 行貨 transfers are arranged by the buyer elsewhere;
+    * a source is a row whose own allocation leaves stock over (``surplus``),
+      a destination is a row that is short;
+    * both ends must sit in the same OM, and a blank OM never matches: without
+      a group we cannot claim the two shops answer to the same manager;
+    * no MOQ rounding — a shop-to-shop move is not a purchase order.
+
+    Spare units are offered to the largest shortage first, then the next, so a
+    single shop's surplus can cover several destinations.
+    """
+    if not om_by_shop:
+        return []
+
+    om_of = {
+        str(code).strip().upper(): str(om or "").strip()
+        for code, om in om_by_shop.items()
+    }
+
+    by_sku: Dict[str, List[Line]] = {}
+    for line in lines:
+        if line.vendor:
+            continue
+        if line.short_qty > 0 or line.surplus_qty > 0:
+            by_sku.setdefault(line.sku, []).append(line)
+
+    out: List[Transfer] = []
+    for sku, rows in by_sku.items():
+        # With the warehouse covering the demand there is nothing to rescue:
+        # the goods come from D001 and a shop keeps whatever it holds.
+        if not any(line.short_qty > 0 for line in rows):
+            continue
+
+        buckets: Dict[str, List[Line]] = {}
+        labels: Dict[str, str] = {}
+        for line in rows:
+            om = om_of.get(line.shop_code.strip().upper(), "")
+            if not om:
+                continue
+            key = om.upper()
+            labels.setdefault(key, om)
+            buckets.setdefault(key, []).append(line)
+
+        for key, members in buckets.items():
+            sources = sorted(
+                (line for line in members if line.surplus_qty > 0),
+                key=lambda line: (-line.surplus_qty, line.shop_code),
+            )
+            if not sources:
+                continue
+            spare = {line.shop_code: line.surplus_qty for line in sources}
+            for dest in sorted(
+                (line for line in members if line.short_qty > 0),
+                key=lambda line: (-line.short_qty, line.shop_code),
+            ):
+                want = dest.short_qty
+                for src in sources:
+                    if want <= 0:
+                        break
+                    qty = min(spare[src.shop_code], want)
+                    if qty <= 0:
+                        continue
+                    spare[src.shop_code] -= qty
+                    want -= qty
+                    out.append(
+                        Transfer(
+                            sku=sku,
+                            om=labels[key],
+                            from_shop=src.shop_code,
+                            to_shop=dest.shop_code,
+                            qty=qty,
+                        )
+                    )
+    return out
+
+
 def compute_scenario(
     scenario: str,
     shops: Sequence[str],
@@ -741,6 +924,10 @@ def compute_scenario(
     moq_by_sku: Optional[Dict[str, int]] = None,
     supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
     vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
+    safety_by_sku: Optional[Dict[str, Dict[str, int]]] = None,
+    group_topup: bool = True,
+    om_by_shop: Optional[Dict[str, str]] = None,
+    suggest_transfer: bool = False,
 ) -> ScenarioResult:
     """Compute allocations and dispatch for one share set.
 
@@ -757,6 +944,14 @@ def compute_scenario(
     ``vendor_sources`` codes are supplied by PO instead of from D001, and those
     rows are allocated against the full promotion target — a PO covers the whole
     period, the warehouse only the dispatch window.
+
+    ``safety_by_sku`` maps SKU -> shop -> the shop's ``Safety Stock``; with
+    ``group_topup`` on, a member of a shared target whose on-hand in a shop is
+    below that level is topped up once (see the module docstring).
+
+    ``om_by_shop`` maps shop -> OM and ``suggest_transfer`` turns on the
+    shop-to-shop advice (see ``suggest_transfers``). Both default to off so an
+    existing caller keeps producing exactly the dispatch report it did before.
     """
     warn = list(warnings or [])
     lines: List[Line] = []
@@ -784,6 +979,10 @@ def compute_scenario(
     vendor_shops: set = set()
     four_shops: set = set()
     po_units = 0
+    # Safety-floor units, summed across SKUs for the one warning line; each
+    # SKU's own summary keeps its share.
+    topup_units = 0
+    topup_line_count = 0
     odd_sources: set = set()
 
     known = set(shops)
@@ -829,6 +1028,7 @@ def compute_scenario(
         )
 
         per_shop_supply = supply_map.get(target.sku, {})
+        per_shop_safety = (safety_by_sku or {}).get(target.sku, {})
         rows: List[dict] = []
         for shop, share, window_alloc, full_alloc in zip(
             shops, shares, window_allocs, full_allocs
@@ -875,6 +1075,9 @@ def compute_scenario(
                     "expected": expected,
                     "rp_type": rp_type,
                     "blocked": blocked,
+                    "gated": gated,
+                    "topup": 0,
+                    "safety": int(round(float(per_shop_safety.get(shop, 0) or 0))),
                     "surplus": max(stock - alloc, 0),
                     "supply_source": code,
                     "vendor": vendor,
@@ -906,6 +1109,11 @@ def compute_scenario(
     # needs overlap; see _cap_group_needs.
     _cap_group_needs(prepared, len(shops))
 
+    # Then give each member a floor, so a shop is never left with one pack of
+    # the promotion and none of the other; see _apply_group_topup.
+    if group_topup:
+        _apply_group_topup(prepared, len(shops))
+
     for item in prepared:
         target = item["target"]
         rows = item["rows"]
@@ -918,11 +1126,31 @@ def compute_scenario(
         # Only warehouse-sourced shops draw on D001. A vendor shop's need is
         # filled by a PO, so letting it compete for the warehouse would starve
         # the shops that can only be served from there.
-        from_warehouse = [0 if row["vendor"] else qty for row, qty in zip(rows, candidates)]
-        if available is not None and sum(from_warehouse) > available:
-            capped_wh = cap_to_available(from_warehouse, available, moq)
+        #
+        # The safety floor is paid for after the Target: base needs take what
+        # they need from D001, and a top-up only receives what is left. One
+        # proportional pool would let a floor quietly cut another shop's
+        # dispatch of the quantity the promotion was planned around.
+        base_wh = [
+            0 if row["vendor"] else max(qty - row["topup"], 0)
+            for row, qty in zip(rows, candidates)
+        ]
+        topup_wh = [
+            0 if row["vendor"] or row["blocked"] else row["topup"] for row in rows
+        ]
+        if available is None:
+            capped_wh = [b + t for b, t in zip(base_wh, topup_wh)]
         else:
-            capped_wh = from_warehouse
+            base_alloc = (
+                cap_to_available(base_wh, available, moq)
+                if sum(base_wh) > available
+                else base_wh
+            )
+            left = max(available - sum(base_alloc), 0)
+            topup_alloc = (
+                cap_to_available(topup_wh, left, moq) if sum(topup_wh) > left else topup_wh
+            )
+            capped_wh = [b + t for b, t in zip(base_alloc, topup_alloc)]
         # A group cap hands out single units rather than MOQ steps, so what is
         # left gets rounded once here. For a standalone SKU this is a no-op.
         capped = [
@@ -953,6 +1181,7 @@ def compute_scenario(
         total_short = 0
         surplus = 0
         needing = 0
+        total_topup = 0
 
         for row, dispatch in zip(rows, capped):
             # Rounding up to the MOQ can ask for a few units more than the gap.
@@ -973,6 +1202,10 @@ def compute_scenario(
                 continue
 
             po = dispatch if row["vendor"] else 0
+            # The part of the need the Target never asked for, i.e. the Safety
+            # floor. Kept apart so the report can label it instead of leaving a
+            # dispatch that looks larger than its own gap unexplained.
+            topup_qty = 0 if row["blocked"] else row["topup"]
             if row["vendor"]:
                 # What the buyer is being asked for over the whole promotion,
                 # not just the days the warehouse covers.
@@ -984,6 +1217,10 @@ def compute_scenario(
             total_expected += row["expected"]
             total_rate += row["rate"]
             surplus += row["surplus"]
+            total_topup += topup_qty
+            topup_units += topup_qty
+            if topup_qty:
+                topup_line_count += 1
             if dispatch > 0:
                 needing += 1
 
@@ -1027,6 +1264,8 @@ def compute_scenario(
                     expected_sales=row["expected"],
                     need_qty=row["need"],
                     short_qty=short,
+                    safety_qty=row["safety"],
+                    topup_qty=topup_qty,
                     supply_source=row["supply_source"],
                     supply_mode=(
                         SUPPLY_VENDOR if row["vendor"] else SUPPLY_WAREHOUSE
@@ -1071,6 +1310,7 @@ def compute_scenario(
                 group=target.group,
                 po_qty=total_po,
                 po_target=total_po_target,
+                topup_qty=total_topup,
                 brand=target.brand,
             )
         )
@@ -1080,12 +1320,51 @@ def compute_scenario(
     # the group is what answers 夠貨.
     skus = _apply_group_coverage(skus, targets)
 
+    # Shop-to-shop advice is opt-in and never changes a dispatch number; it only
+    # answers "if D001 cannot send it, who nearby could?".
+    transfers = suggest_transfers(lines, om_by_shop) if suggest_transfer else []
+    if suggest_transfer:
+        if transfers:
+            warn.append(
+                f"建議調貨：{len(transfers)} 組共 {sum(t.qty for t in transfers):,} 件"
+                "（只限同一個 OM、只在 D001 不足派時提供）。"
+                "調貨通知一般 4–7 日，未必趕及推廣開始，不能代替開 PO／STO，"
+                "請自行判斷是否採用"
+            )
+        om_known = {
+            str(code).strip().upper(): str(om or "").strip()
+            for code, om in (om_by_shop or {}).items()
+        }
+        missing_om = sorted(
+            {
+                line.shop_code
+                for line in lines
+                if (line.short_qty > 0 or line.surplus_qty > 0)
+                and not om_known.get(line.shop_code.strip().upper())
+            }
+        )
+        if missing_om:
+            warn.append(
+                f"有 {len(missing_om)} 間店舖在店舖主檔沒有 OM（"
+                + "、".join(missing_om[:8])
+                + ("…" if len(missing_om) > 8 else "")
+                + "），不會為它們建議調貨；同一個 OM 才可互相調貨"
+            )
     if blocked_skus:
         warn.append(
             "、".join(sorted(gate))
             + f" 依 RP Type 規則不派貨：{len(blocked_skus)} 個 SKU，共少派 "
             + f"{blocked_units:,} 件（只有 RP Type = {RP_DISPATCHABLE} 才派，"
             + "ND 或未提供一律 0 件）"
+        )
+    if topup_units:
+        # Reported because these units are dispatched without the Target asking
+        # for them: a reader comparing 需求 with the Target would otherwise see
+        # stock leaving D001 for a shop whose group was already covered.
+        warn.append(
+            f"貨組補底：{topup_line_count} 個 SKU × 店舖的可用量（現有＋在途）低於 "
+            f"Safety Stock，共 {topup_units:,} 件已補至 Safety 水平"
+            "（只限貨組成員；按 MOQ 進位，計入需求，D001 不夠派時照樣計缺貨）"
         )
     if po_units:
         short_window = (
@@ -1139,6 +1418,7 @@ def compute_scenario(
         skus=skus,
         share_total=share_total,
         warnings=warn,
+        transfers=transfers,
     )
 
 
@@ -1157,6 +1437,10 @@ def compute_all_scenarios(
     moq_by_sku: Optional[Dict[str, int]] = None,
     supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
     vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
+    safety_by_sku: Optional[Dict[str, Dict[str, int]]] = None,
+    group_topup: bool = True,
+    om_by_shop: Optional[Dict[str, str]] = None,
+    suggest_transfer: bool = False,
 ) -> Dict[str, ScenarioResult]:
     """Compute every scenario from {scenario: {shop: pct}}."""
     out: Dict[str, ScenarioResult] = {}
@@ -1180,6 +1464,10 @@ def compute_all_scenarios(
             moq_by_sku=moq_by_sku,
             supply_by_sku=supply_by_sku,
             vendor_sources=vendor_sources,
+            safety_by_sku=safety_by_sku,
+            group_topup=group_topup,
+            om_by_shop=om_by_shop,
+            suggest_transfer=suggest_transfer,
         )
     return out
 

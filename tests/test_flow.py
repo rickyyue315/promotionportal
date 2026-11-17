@@ -958,6 +958,169 @@ def test_shared_target_flows_through_to_the_result(client):
     assert any(row[0] == "共用 Target" for row in params)
 
 
+def _sap_safety_bytes(rows) -> bytes:
+    """SAP export carrying Safety Stock, the floor a group member is lifted to."""
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Article", "Site", "SaSa Net Stock", "Safety Stock", "MOQ"])
+    for sku, site, qty, safety, moq in rows:
+        ws.append([sku, site, qty, safety, moq])
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_sap_export_reads_safety_stock(client):
+    from app import excel_io
+
+    parsed = excel_io.parse_stock_file(
+        _sap_safety_bytes([("111058302001", "HA19", 0, 120, 6),
+                           ("111058302001", "HA19", 0, 120, 6)])
+    )
+    assert not parsed.errors
+    assert parsed.mapped["safety"] == "Safety Stock"
+    # Repeating the row must not double the floor, nor let a blank cancel it.
+    assert parsed.rows[0].safety == 120
+    assert parsed.rows[0].qty == 0
+
+
+def test_stock_file_without_safety_stock_reports_none(client):
+    from app import excel_io
+
+    parsed = excel_io.parse_stock_file((SAMPLES / "sample_stock_wide.xlsx").read_bytes())
+    assert "safety" not in [k for k, v in parsed.mapped.items() if v]
+    assert all(row.safety == 0 for row in parsed.rows)
+
+
+def _group_target_bytes() -> bytes:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append(["111058302001", "HYDRA 7PC", 400])
+    ws.append(["111058302002", "HYDRA 14PC", None])
+    ws.merge_cells("C2:C3")
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
+def test_group_topup_runs_from_the_run_form(client):
+    """A covered group still gets a floor, and the export says so."""
+    from openpyxl import Workbook, load_workbook
+
+    login(client, "adminpw", "Ricky")
+    shop = [s["code"] for s in db.list_shops(active_only=True)][0]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "店舖", "庫存", "Last Month Sold Qty", "Safety Stock"])
+    ws.append(["111058302001", shop, 0, 800, 100])
+    ws.append(["111058302002", shop, 450, 200, 0])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", "group_topup": "1", **PROMO},
+        files={
+            "target_file": ("shared.xlsx", _group_target_bytes()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+    run = runstore.get(token)
+    assert run is not None and run.params["group_topup"] is True
+    assert run.params["has_safety"] is True
+
+    res = run.results["A"]
+    a = next(s for s in res.skus if s.sku == "111058302001")
+    b = next(s for s in res.skus if s.sku == "111058302002")
+    # The group is covered by the 14PC's 450 on hand in this shop, so only the
+    # floor moves there; the other shops are short of their own shares.
+    assert a.enough and b.enough
+    assert a.topup_qty == 100
+    at_shop = {
+        ln.sku: ln for ln in res.lines if ln.shop_code == shop
+    }
+    assert at_shop["111058302001"].dispatch_qty == 100
+    assert at_shop["111058302001"].topup_qty == 100
+    assert at_shop["111058302002"].dispatch_qty == 0
+    assert any("貨組補底" in w for w in res.warnings)
+
+    page = client.get(f"/run/{token}")
+    assert "Safety 補底" in page.text
+
+    export = client.get(f"/run/{token}/export.xlsx")
+    book = load_workbook(io.BytesIO(export.content))
+    detail = book["明細_A"]
+    head = [c.value for c in detail[1]]
+    topup_col = head.index("補底") + 1
+    safety_col = head.index("Safety Stock") + 1
+    rows = {
+        (detail.cell(row=r, column=2).value, detail.cell(row=r, column=4).value): r
+        for r in range(2, detail.max_row + 1)
+    }
+    floor_row = rows[("111058302001", shop)]
+    assert detail.cell(row=floor_row, column=topup_col).value == 100
+    assert detail.cell(row=floor_row, column=safety_col).value == 100
+    # The pack that already covered the group was not topped up.
+    assert not detail.cell(row=rows[("111058302002", shop)], column=topup_col).value
+
+    params = {row[0]: row[1] for row in book["參數"].iter_rows(values_only=True)}
+    assert "Safety" in params["貨組補底"]
+    assert "Safety Stock" in params["Safety Stock 來源"]
+
+    # Hover notes must stay on their own cell. openpyxl's write-only mode reuses
+    # one cell object per row and only replaces it after a styled cell, so a
+    # comment on a plain cell used to be copied to everything to its right.
+    compare = book["比較"]
+    assert compare["B2"].comment is not None      # 貨組 note on the SKU cell
+    assert compare["C2"].comment is None          # … and not on the name
+    # 17 fixed columns, then 需求 / 派貨 / 開 PO / 缺貨: the row that carries the
+    # floor says so on its 派貨 cell, and only there.
+    assert compare.cell(row=2, column=19).comment is not None
+    assert compare.cell(row=2, column=20).comment is None
+    assert compare.cell(row=3, column=19).comment is None
+
+
+def test_group_topup_is_off_when_the_box_is_not_ticked(client):
+    from openpyxl import Workbook
+
+    login(client, "adminpw", "Ricky")
+    shop = [s["code"] for s in db.list_shops(active_only=True)][0]
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "店舖", "庫存", "Last Month Sold Qty", "Safety Stock"])
+    ws.append(["111058302001", shop, 0, 800, 100])
+    ws.append(["111058302002", shop, 450, 200, 0])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO},  # no group_topup = unchecked
+        files={
+            "target_file": ("shared.xlsx", _group_target_bytes()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+    run = runstore.get(token)
+    assert run.params["group_topup"] is False
+    res = run.results["A"]
+    at_shop = {ln.sku: ln for ln in res.lines if ln.shop_code == shop}
+    assert at_shop["111058302001"].dispatch_qty == 0
+    assert at_shop["111058302001"].topup_qty == 0
+
+
 def _sap_supply_bytes(rows) -> bytes:
     """SAP export carrying Supply source, the column that picks the route."""
     from openpyxl import Workbook
@@ -1267,7 +1430,8 @@ def test_export_colours_what_has_to_be_raised(client):
     # Layout: the identifying columns stay put, the header wraps, and the
     # filter covers exactly the rows that exist.
     assert ws.freeze_panes == "F2"
-    assert ws.auto_filter.ref == f"A1:Y{1 + len(rows)}"
+    # The filter follows the header, so a new column cannot leave it short.
+    assert ws.auto_filter.ref == f"A1:AA{1 + len(rows)}"
     assert ws.row_dimensions[1].height >= 40
     assert ws["A1"].alignment.wrap_text is True
     assert ws.column_dimensions["C"].width >= 30
@@ -1786,3 +1950,88 @@ def test_brand_code_leads_the_sku_in_the_export(client):
         for row in book["參數"].iter_rows(values_only=True)
     }
     assert "Brand code" in notes["Brand Code 來源"]
+
+
+def test_transfer_suggestion_is_opt_in_and_stays_inside_one_om(client):
+    """建議調貨: off unless ticked, same OM only, and carried into the export."""
+    from openpyxl import Workbook, load_workbook
+
+    period = "2027-08"
+    sku = "111058304004"
+
+    # Two OMs, each with one shop short and one holding spare.
+    db.upsert_shop("HA11", "HA11 缺貨店", "HK", 1, "OM 1")
+    db.upsert_shop("HA12", "HA12 盈餘店", "HK", 1, "OM 1")
+    db.upsert_shop("HA13", "HA13 缺貨店", "HK", 1, "OM 2")
+    db.upsert_shop("HA14", "HA14 盈餘店", "HK", 1, "OM 2")
+    db.save_shares(
+        period,
+        "A",
+        {"HA11": 0.25, "HA12": 0.25, "HA13": 0.25, "HA14": 0.25},
+        "tester",
+    )
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 100])
+    target = io.BytesIO()
+    wb.save(target)
+
+    # D001 holds nothing: the shops' only hope is each other.
+    stock = _sap_consign_bytes(
+        [
+            (sku, "D001", 0, 0, "2"),
+            (sku, "HA11", 0, 0, "2"),
+            (sku, "HA12", 100, 0, "2"),
+            (sku, "HA13", 0, 0, "2"),
+            (sku, "HA14", 100, 0, "2"),
+        ]
+    )
+
+    def run_with(extra: dict) -> str:
+        login(client, "adminpw", "Ricky")
+        resp = client.post(
+            "/run/new",
+            data={"period": period, **PROMO, **extra},
+            files={
+                "target_file": ("t.xlsx", target.getvalue()),
+                "stock_file": ("s.xlsx", stock),
+            },
+            follow_redirects=False,
+        )
+        assert resp.status_code == 303, resp.text
+        return resp.headers["location"].rstrip("/").split("/")[-1]
+
+    # Default: no advice, no sheet, and the parameter says it was off.
+    token = run_with({})
+    run = runstore.get(token)
+    assert run.params["suggest_transfer"] is False
+    assert run.results["A"].transfers == []
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    assert "調貨建議" not in book.sheetnames
+    notes = {row[0]: row[1] for row in book["參數"].iter_rows(values_only=True)}
+    assert notes["建議調貨"] == "未開啟（預設）"
+
+    # Ticked: one pair per OM, and the pair never crosses the OM boundary.
+    token = run_with({"suggest_transfer": "1"})
+    run = runstore.get(token)
+    assert run.params["suggest_transfer"] is True
+    assert [
+        (t.om, t.from_shop, t.to_shop, t.qty) for t in run.results["A"].transfers
+    ] == [("OM 1", "HA12", "HA11", 25), ("OM 2", "HA14", "HA13", 25)]
+    # The dispatch itself is untouched: HA11 still shows the 25 it is short.
+    line = {ln.shop_code: ln for ln in run.results["A"].lines}["HA11"]
+    assert line.dispatch_qty == 0
+    assert line.short_qty == 25
+
+    page = client.get(f"/run/{token}/detail?scenario=A&sku={sku}")
+    assert "建議調貨" in page.text
+    assert "HA12" in page.text and "HA11" in page.text
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    assert "調貨建議" in book.sheetnames
+    transfer_rows = list(book["調貨建議"].iter_rows(values_only=True))
+    assert transfer_rows[0][:4] == ("餐別", "SKU", "貨品名稱", "OM")
+    assert transfer_rows[1] == ("A", sku, "面膜", "OM 1", "HA12", "HA12 盈餘店", "HA11", "HA11 缺貨店", 25)
+    assert transfer_rows[2][0] == "A" and transfer_rows[2][8] == 25
