@@ -177,6 +177,18 @@
 
 <section class="card">
   <header>
+    <h2>計算流程</h2>
+    <span class="hint">一件貨由 Target 走到派貨／缺貨</span>
+  </header>
+  <div class="body">
+    <img src="/static/calc-flow.svg?v={{ version.version }}"
+         alt="計算流程圖：Target 檔 → 縮小 Target → 拆到店舖 → 算需求 → 過 D001 上限；貨組另加拆回各 SKU、同店封頂、整組夠貨三步。"
+         style="display:block;width:100%;height:auto">
+  </div>
+</section>
+
+<section class="card">
+  <header>
     <h2>共用 Target（貨組）怎樣計</h2>
     <span class="hint">同一貨品的幾個包裝共用一個 Target 時</span>
   </header>
@@ -210,6 +222,13 @@
         <div style="font-weight:600;color:var(--text);margin-bottom:2px">⑥ 表上怎樣顯示</div>
         比較表一行顯示整組（<span class="mono">111058302001 + 111058302002</span>，旁標「貨組 2」）；明細頁與 Excel 明細逐個 SKU，方便照單派貨。
       </div>
+    </div>
+
+    <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border)">
+      <div style="font-weight:600;color:var(--text);margin-bottom:10px">看一個例子：7PC 與 14PC 共用 4,000 件</div>
+      <img src="/static/calc-group.svg?v={{ version.version }}"
+           alt="貨組例子：4,000 件按銷量 60:40 拆成 2,400 與 1,600，縮小後 960 與 640，HA01 佔 25% 得 240 與 160，因店內已有 350 件而封頂至 50 件。"
+           style="display:block;width:100%;height:auto">
     </div>
   </div>
 </section>

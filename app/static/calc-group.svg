@@ -1,0 +1,86 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 360" width="1200" height="360" role="img" aria-labelledby="groupTitle groupDesc">
+  <title id="groupTitle">貨組（共用 Target）計算例子</title>
+  <desc id="groupDesc">7 片與 14 片共用 4,000 件：按銷量 60:40 拆成 2,400 與 1,600，推廣 10 日派 4 日縮小成 960 與 640，HA01 佔 25% 得 240 與 160（整組 400）；HA01 已有 350 件，整組只差 50 件，所以封頂後派 50 件而不是 240 件。</desc>
+
+  <rect width="1200" height="360" fill="#ffffff"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif">
+
+    <!-- ① split back -->
+    <g>
+      <rect x="20" y="24" width="272" height="252" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="40" y="52" font-size="14" font-weight="600" fill="#1c1c1a">① 先拆回各 SKU</text>
+      <line x1="36" y1="64" x2="276" y2="64" stroke="#e3e3de"/>
+      <text x="40" y="86" font-size="11.5" fill="#82827a">Target 檔第一行填數量</text>
+      <text x="40" y="112" font-size="12.5" fill="#55554f">7PC</text>
+      <text x="112" y="112" font-size="12.5" font-weight="600" fill="#1c1c1a">4,000</text>
+      <text x="40" y="136" font-size="12.5" fill="#55554f">14PC</text>
+      <text x="112" y="136" font-size="12.5" fill="#55554f">（合併／留空）</text>
+      <line x1="36" y1="154" x2="276" y2="154" stroke="#f0f0ec"/>
+      <text x="40" y="182" font-size="12.5" fill="#55554f">銷量比重</text>
+      <text x="112" y="182" font-size="12.5" font-weight="600" fill="#1c1c1a">60% : 40%</text>
+      <text x="40" y="212" font-size="12.5" font-weight="600" fill="#1f6f5c">→ 2,400 ／ 1,600</text>
+      <text x="40" y="244" font-size="11.5" fill="#82827a">合計仍是 4,000，一件不多</text>
+    </g>
+
+    <!-- ② scale -->
+    <g>
+      <rect x="316" y="24" width="272" height="252" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="336" y="52" font-size="14" font-weight="600" fill="#1c1c1a">② 縮小（例：10 日派 4 日）</text>
+      <line x1="332" y1="64" x2="572" y2="64" stroke="#e3e3de"/>
+      <text x="336" y="86" font-size="11.5" fill="#82827a">每個 SKU 各自 × 4 ÷ 10</text>
+      <text x="336" y="112" font-size="12.5" fill="#55554f">7PC</text>
+      <text x="408" y="112" font-size="12.5" font-weight="600" fill="#1c1c1a">2,400 → 960</text>
+      <text x="336" y="136" font-size="12.5" fill="#55554f">14PC</text>
+      <text x="408" y="136" font-size="12.5" font-weight="600" fill="#1c1c1a">1,600 → 640</text>
+      <line x1="332" y1="154" x2="572" y2="154" stroke="#f0f0ec"/>
+      <text x="336" y="182" font-size="12.5" fill="#55554f">派貨目標</text>
+      <text x="408" y="182" font-size="12.5" font-weight="600" fill="#1c1c1a">1,600</text>
+      <text x="336" y="216" font-size="11.5" fill="#82827a">行貨店舖例外：</text>
+      <text x="336" y="234" font-size="11.5" fill="#82827a">用全期份額，不縮小</text>
+    </g>
+
+    <!-- ③ apportion -->
+    <g>
+      <rect x="612" y="24" width="272" height="252" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="632" y="52" font-size="14" font-weight="600" fill="#1c1c1a">③ 拆到 HA01（佔 25%）</text>
+      <line x1="628" y1="64" x2="868" y2="64" stroke="#e3e3de"/>
+      <text x="632" y="86" font-size="11.5" fill="#82827a">按該餐的店舖佔比分配</text>
+      <text x="632" y="112" font-size="12.5" fill="#55554f">7PC</text>
+      <text x="704" y="112" font-size="12.5" font-weight="600" fill="#1c1c1a">960 × 25% ＝ 240</text>
+      <text x="632" y="136" font-size="12.5" fill="#55554f">14PC</text>
+      <text x="704" y="136" font-size="12.5" font-weight="600" fill="#1c1c1a">640 × 25% ＝ 160</text>
+      <line x1="628" y1="154" x2="868" y2="154" stroke="#f0f0ec"/>
+      <text x="632" y="182" font-size="12.5" fill="#55554f">整組分配</text>
+      <text x="704" y="182" font-size="12.5" font-weight="600" fill="#1c1c1a">400</text>
+      <text x="632" y="216" font-size="11.5" fill="#82827a">HA01 存貨：7PC 0</text>
+      <text x="632" y="234" font-size="11.5" fill="#82827a">　　　　　14PC 350</text>
+    </g>
+
+    <!-- ④ group cap -->
+    <g>
+      <rect x="908" y="24" width="272" height="252" rx="10" fill="#fdf5e6" stroke="#eeddb8"/>
+      <text x="928" y="52" font-size="14" font-weight="600" fill="#96650f">④ 同店封頂（關鍵）</text>
+      <line x1="924" y1="64" x2="1164" y2="64" stroke="#eeddb8"/>
+      <text x="928" y="86" font-size="11.5" fill="#96650f">整組需求 ＝ Σ 分配 − Σ 存貨</text>
+      <text x="928" y="112" font-size="12.5" fill="#55554f">分配</text>
+      <text x="1000" y="112" font-size="12.5" font-weight="600" fill="#1c1c1a">400</text>
+      <text x="928" y="136" font-size="12.5" fill="#55554f">存貨</text>
+      <text x="1000" y="136" font-size="12.5" font-weight="600" fill="#1c1c1a">350</text>
+      <line x1="924" y1="154" x2="1164" y2="154" stroke="#eeddb8"/>
+      <text x="928" y="182" font-size="12.5" fill="#55554f">需求</text>
+      <text x="1000" y="182" font-size="12.5" font-weight="600" fill="#1c1c1a">50</text>
+      <text x="928" y="212" font-size="12" font-weight="600" fill="#b3392c">7PC 缺口 240 → 只派 50</text>
+      <text x="928" y="238" font-size="11.5" fill="#96650f">兩個包裝不會各派一次</text>
+    </g>
+
+    <!-- chevrons -->
+    <g fill="#a8a8a0">
+      <path d="M299,144 L308,150 L299,156 z"/>
+      <path d="M595,144 L604,150 L595,156 z"/>
+      <path d="M891,144 L900,150 L891,156 z"/>
+    </g>
+
+    <text x="20" y="306" font-size="13" fill="#55554f">不封頂的話 7PC 會派 240 件 —— 但店裡已經有 350 件 14PC，整組其實只差 50 件，多派的 190 件是重複。</text>
+    <text x="20" y="330" font-size="12.5" fill="#82827a">倉存上限仍逐個 SKU：D001 的 14PC 再多，也不會自動補給 7PC。</text>
+  </g>
+</svg>

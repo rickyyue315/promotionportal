@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import subprocess
 import sys
 from pathlib import Path
@@ -43,9 +44,16 @@ CSS = (ROOT / "app" / "static" / "app.css").read_text(encoding="utf-8")
 
 
 def inline(html: str) -> str:
-    return html.replace(
+    html = html.replace(
         '<link rel="stylesheet" href="/static/app.css">',
         f"<style>{CSS}</style>",
+    )
+    # The page asks for /static/*.svg, but a file:// render has no server, so
+    # point each image at the real file. Same bytes as the deployed asset.
+    return re.sub(
+        r'src="/static/([^"?]+)(\?[^"]*)?"',
+        lambda m: f'src="{(ROOT / "app" / "static" / m.group(1)).as_uri()}"',
+        html,
     )
 
 
@@ -306,7 +314,7 @@ def main() -> None:
         print("rendering:")
         shoot(c, "/", "01_dashboard", 1250)
         shoot(c, "/admin/shares?period=2026-11&scenario=B", "02_shares", 1250)
-        shoot(c, "/run/new?period=2026-11", "03_upload", 1700)
+        shoot(c, "/run/new?period=2026-11", "03_upload", 2900)
         shoot(c, f"/run/{run_id}", "04_result", 1500)
         shoot(c, f"/run/{run_id}/detail?scenario=A", "05_detail_shops", 1300)
         shoot(c, f"/run/{run_id}/detail?scenario=A&sku=111888009033", "06_detail_sku", 1300)

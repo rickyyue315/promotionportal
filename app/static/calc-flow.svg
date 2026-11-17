@@ -1,0 +1,66 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 324" width="1200" height="324" role="img" aria-labelledby="flowTitle flowDesc">
+  <title id="flowTitle">計算流程圖</title>
+  <desc id="flowDesc">Target 檔 → 縮小 Target → 拆到店舖 → 算需求 → 過 D001 上限。若幾個包裝共用一個 Target（貨組），會先按銷量比例拆回各 SKU、同店以整組需求封頂，並以整組判斷夠貨。</desc>
+
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto">
+      <path d="M0,1 L9,5 L0,9 z" fill="#a9a9a1"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="324" fill="#ffffff"/>
+  <g font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans TC', 'PingFang TC', 'Microsoft JhengHei', sans-serif">
+
+    <!-- five steps -->
+    <g>
+      <rect x="31" y="40" width="202" height="96" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="47" y="74" font-size="15" font-weight="600" fill="#1c1c1a">Target 檔</text>
+      <text x="47" y="99" font-size="12.5" fill="#55554f">整段推廣要賣幾多件</text>
+      <text x="47" y="118" font-size="12.5" fill="#82827a">行貨／倉貨同一份</text>
+    </g>
+    <g>
+      <rect x="265" y="40" width="202" height="96" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="281" y="74" font-size="15" font-weight="600" fill="#1c1c1a">縮小 Target</text>
+      <text x="281" y="99" font-size="12.5" fill="#55554f">× 派貨日數 ÷ 推廣日數</text>
+      <text x="281" y="118" font-size="12.5" fill="#82827a">例：14 日派 4 日 → ×4÷14</text>
+    </g>
+    <g>
+      <rect x="499" y="40" width="202" height="96" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="515" y="74" font-size="15" font-weight="600" fill="#1c1c1a">拆到店舖</text>
+      <text x="515" y="99" font-size="12.5" fill="#55554f">按該餐的店舖佔比分配</text>
+      <text x="515" y="118" font-size="12.5" fill="#82827a">最大餘數法，合計不變</text>
+    </g>
+    <g>
+      <rect x="733" y="40" width="202" height="96" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="749" y="74" font-size="15" font-weight="600" fill="#1c1c1a">算需求</text>
+      <text x="749" y="99" font-size="12.5" fill="#55554f">− 現有庫存 − 在途</text>
+      <text x="749" y="118" font-size="12.5" fill="#82827a">再按 MOQ 向上進位</text>
+    </g>
+    <g>
+      <rect x="967" y="40" width="202" height="96" rx="10" fill="#fbfbf9" stroke="#e3e3de"/>
+      <text x="983" y="74" font-size="15" font-weight="600" fill="#1c1c1a">過 D001 上限</text>
+      <text x="983" y="99" font-size="12.5" fill="#55554f">不夠時按需求比例分配</text>
+      <text x="983" y="118" font-size="12.5" fill="#82827a">差額 ＝ 缺貨</text>
+    </g>
+
+    <!-- arrows -->
+    <g stroke="#c7c7bf" stroke-width="1.5" marker-end="url(#arrow)">
+      <line x1="235" y1="88" x2="257" y2="88"/>
+      <line x1="469" y1="88" x2="491" y2="88"/>
+      <line x1="703" y1="88" x2="725" y2="88"/>
+      <line x1="937" y1="88" x2="959" y2="88"/>
+    </g>
+
+    <text x="31" y="162" font-size="12.5" fill="#82827a">行貨店舖（Supply source 1／4）不經 D001：需求直接變成須開 PO，用全期 Target 計；倉貨店舖才由 D001 開 STO。</text>
+
+    <!-- group inset -->
+    <rect x="31" y="186" width="1138" height="126" rx="10" fill="#e7f2ee" stroke="#c9ded6" stroke-dasharray="5 4"/>
+    <text x="51" y="214" font-size="13.5" font-weight="600" fill="#1f6f5c">同一個 Target 由幾個包裝共用（貨組）時，多走這三步</text>
+
+    <g font-size="12.5" fill="#3c5a51">
+      <text x="51" y="244"><tspan font-weight="700">①</tspan><tspan dx="6">拆回各 SKU：按銷量比例（無銷量 → 現有庫存 → 平均），合計剛好等於整組 Target</tspan></text>
+      <text x="51" y="272"><tspan font-weight="700">②</tspan><tspan dx="6">同店封頂：整組需求 ＝ Σ 分配 − Σ（現有庫存＋在途），正數才派，兩個包裝不會各派一次</tspan></text>
+      <text x="51" y="300"><tspan font-weight="700">③</tspan><tspan dx="6">夠貨看整組：Σ（店舖＋在途＋D001 可派）≥ 整組 Target；差額只寫在首行，其他成員 0</tspan></text>
+    </g>
+  </g>
+</svg>
