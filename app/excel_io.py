@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import io
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
@@ -53,6 +53,10 @@ PROMO_END_KEYS = (
     "結束日期",
 )
 DESC_KEYS = ("description", "desc", "name", "名稱", "描述", "貨品名稱")
+# Brand code is an optional label on the target file. Nothing is calculated
+# from it; it rides along so the exported sheets can say whose SKU a line is
+# instead of leaving the reader to recognise the article number.
+BRAND_KEYS = ("brand code", "brandcode", "brand_code", "brand", "品牌", "品牌代碼")
 SHOP_KEYS = ("shop", "site", "store", "outlet", "店舖", "店鋪", "分店", "門市")
 # Ordered most-specific first. A SAP export carries Safety Stock, Stock in
 # Transit and SaSa Net Stock side by side; "stock" alone must not win.
@@ -171,6 +175,15 @@ def to_number(value: Any) -> Optional[float]:
     return -number if negative else number
 
 
+def code_text(value: Any) -> str:
+    """A label cell as written: no trailing '.0' from a numeric code cell."""
+    if value is None or isinstance(value, bool):
+        return ""
+    if isinstance(value, float) and value.is_integer():
+        return str(int(value))
+    return str(value).strip()
+
+
 def to_date(value: Any) -> Optional[date]:
     """Parse Excel date cells and the usual text spellings."""
     if value is None or isinstance(value, bool):
@@ -232,12 +245,18 @@ class TargetRow:
     ``qty`` is 0 for the members of a shared target: only the row that carries
     the number in the spreadsheet has it, and ``group`` names that row's SKU.
     Standalone SKUs leave ``group`` empty.
+
+    ``brand`` is copied straight from the sheet's Brand code column and is only
+    ever used as a label — the export prints it in front of the SKU, so a file
+    that leaves the portal still says which brand the article belongs to. A
+    sheet without the column simply yields empty strings.
     """
 
     sku: str
     description: str
     qty: int
     group: str = ""
+    brand: str = ""
 
 
 @dataclass
@@ -323,8 +342,17 @@ def parse_target_file(
     body = raw[h + 1 :]
 
     i_sku = _find(headers, SKU_KEYS)
-    i_target = _find(headers, TARGET_KEYS, exclude={i_sku} if i_sku is not None else ())
     i_desc = _find(headers, DESC_KEYS, exclude={i_sku} if i_sku is not None else ())
+    i_brand = _find(
+        headers,
+        BRAND_KEYS,
+        exclude={i for i in (i_sku, i_desc) if i is not None},
+    )
+    i_target = _find(
+        headers,
+        TARGET_KEYS,
+        exclude={i for i in (i_sku, i_desc, i_brand) if i is not None},
+    )
     # MOQ lives on the stock side (SKU × shop), not here. A leftover MOQ column
     # in an old template is simply not read: it is not a quantity to act on and
     # the run has nothing useful to say about it, so it stays out of the way.
@@ -344,10 +372,11 @@ def parse_target_file(
         "sku": raw[h][i_sku],
         "target": raw[h][i_target],
         "description": raw[h][i_desc] if i_desc is not None else "",
+        "brand": raw[h][i_brand] if i_brand is not None else "",
     }
 
     # ---- promo window printed inside the sheet -----------------------------
-    taken = {i for i in (i_sku, i_target, i_desc) if i is not None}
+    taken = {i for i in (i_sku, i_target, i_desc, i_brand) if i is not None}
     i_pstart = _find(headers, PROMO_START_KEYS, exclude=taken)
     i_pend = _find(
         headers,
@@ -407,6 +436,10 @@ def parse_target_file(
         if i_desc is not None and i_desc < len(row) and row[i_desc] is not None:
             desc = str(row[i_desc]).strip()
 
+        brand = ""
+        if i_brand is not None and i_brand < len(row):
+            brand = code_text(row[i_brand])
+
         raw_qty = row[i_target] if i_target < len(row) else None
         qty = to_number(raw_qty)
         if qty is None:
@@ -421,7 +454,7 @@ def parse_target_file(
                     continue
                 seen[sku] = 1
                 shared.append(sku)
-                out.rows.append(TargetRow(sku, desc, 0, group=group_key))
+                out.rows.append(TargetRow(sku, desc, 0, group=group_key, brand=brand))
                 continue
             bad_rows.append(f"第 {offset} 行（{sku}）：Target 不是數字")
             continue
@@ -437,13 +470,13 @@ def parse_target_file(
             continue
         seen[sku] = 1
         group_key = sku
-        out.rows.append(TargetRow(sku, desc, qty_i))
+        out.rows.append(TargetRow(sku, desc, qty_i, brand=brand))
 
     # The first row of a block gains its group only once a follower proves it
     # has one, so parse in order and fix the owner up at the end.
     members = {row.group for row in out.rows if row.group}
     out.rows = [
-        TargetRow(r.sku, r.description, r.qty, r.group or (r.sku if r.sku in members else ""))
+        replace(r, group=r.group or (r.sku if r.sku in members else ""))
         for r in out.rows
     ]
 
@@ -992,9 +1025,10 @@ def _target_heads(params: dict) -> Tuple[str, str]:
 # Widths that fit the Chinese headings and the numbers under them. The default
 # 8.43 clips most of them, and this file is read by people, not by a parser.
 _DETAIL_WIDTHS = {
-    "A": 13, "B": 38, "C": 8, "D": 24, "E": 7, "F": 9, "G": 10, "H": 8,
-    "I": 16, "J": 16, "K": 9, "L": 7, "M": 7, "N": 7, "O": 7, "P": 8,
-    "Q": 10, "R": 12, "S": 8, "T": 8, "U": 9, "V": 9, "W": 9, "X": 22,
+    "A": 13, "B": 16, "C": 38, "D": 8, "E": 24, "F": 7, "G": 9, "H": 10,
+    "I": 8, "J": 16, "K": 16, "L": 9, "M": 7, "N": 7, "O": 7, "P": 7,
+    "Q": 8, "R": 10, "S": 12, "T": 8, "U": 8, "V": 9, "W": 9, "X": 9,
+    "Y": 22,
 }
 
 
@@ -1004,24 +1038,27 @@ def _detail_layout(ws, last_row: int) -> None:
     A frozen header and auto-filter are what the shop-by-shop sheets are used
     for: scroll to row 140 and you still know which column you are reading.
     """
-    ws.freeze_panes = "E2"
-    ws.auto_filter.ref = f"A1:X{last_row}"
+    # A–E: Brand Code, SKU, 貨品名稱, 店舖, 店舖名稱.
+    ws.freeze_panes = "F2"
+    ws.auto_filter.ref = f"A1:Y{last_row}"
     ws.row_dimensions[1].height = 45
     for col, width in _DETAIL_WIDTHS.items():
         ws.column_dimensions[col].width = width
 
 
 def _compare_layout(ws, last_row: int, n_cols: int) -> None:
-    ws.freeze_panes = "C2"
+    # Brand Code, SKU and 貨品名稱 stay put while the numbers scroll sideways.
+    ws.freeze_panes = "D2"
     ws.auto_filter.ref = f"A1:{get_column_letter(n_cols)}{last_row}"
     ws.row_dimensions[1].height = 30
     ws.column_dimensions["A"].width = 13
-    ws.column_dimensions["B"].width = 38
+    ws.column_dimensions["B"].width = 15
+    ws.column_dimensions["C"].width = 38
     # 推廣時期 holds two dates and 日數 the day count with the dispatch window
     # in brackets; both are wider than a number, so they get their own widths.
-    ws.column_dimensions["C"].width = 23
-    ws.column_dimensions["D"].width = 17
-    for idx in range(5, n_cols + 1):
+    ws.column_dimensions["D"].width = 23
+    ws.column_dimensions["E"].width = 17
+    for idx in range(6, n_cols + 1):
         ws.column_dimensions[get_column_letter(idx)].width = 9.5
 
 
@@ -1055,8 +1092,11 @@ def export_run(
     # --- comparison sheet ---
     ws = wb.create_sheet("比較")
     promo_period, promo_days = _promo_cells(params)
+    # Brand Code leads every sheet: an article number alone does not tell a
+    # reader outside the portal whose SKU the line is, and the target file is
+    # where that label already exists. Blank when the upload had no such column.
     headers = [
-        "SKU", "貨品名稱", "推廣時期", "日數", "Target", "派貨目標",
+        "Brand Code", "SKU", "貨品名稱", "推廣時期", "日數", "Target", "派貨目標",
         "店舖庫存", "在途",
         "倉存", "倉存在途", "日銷", "預計銷量", "目標差距", "貨源缺口",
         "RP 不派", "夠貨",
@@ -1067,8 +1107,8 @@ def export_run(
         headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO（全期）", f"{sc} 缺貨"]
     # The first column of each block carries the plan's name as a hover note:
     # "A 需求" alone does not tell a reader outside the portal what A is.
-    fixed_cols = 16
-    notes = {3: _promo_note(params)}
+    fixed_cols = 17
+    notes = {4: _promo_note(params)}
     for i, sc in enumerate(scenarios):
         if labels.get(sc):
             notes[fixed_cols + i * 4] = _legend_note(sc, labels.get(sc) or {})
@@ -1081,6 +1121,7 @@ def export_run(
     for row in compare_rows:
         first = next(iter(row["scenarios"].values()), None)
         line: List[Any] = [
+            row.get("brand", ""),
             row["sku"],
             row["description"],
             promo_period,
@@ -1130,20 +1171,23 @@ def export_run(
             continue
         ws2 = wb.create_sheet(f"明細_{sc}")
         detail_heads = [
-            "SKU", "貨品名稱", "店舖", "店舖名稱", "貨源", "Supply Source",
-            "分配基準", "佔比",
+            "Brand Code", "SKU", "貨品名稱", "店舖", "店舖名稱", "貨源",
+            "Supply Source", "分配基準", "佔比",
             full_head, window_head, "現有庫存", "在途", "可用", "差距", "MOQ",
             "需求", "可派 STO", "開 PO（全期）", "缺貨",
             "日銷", "預計銷量", "可調出", "RP Type", "不派原因",
         ]
         # Before the header row, for the same reason as the comparison sheet.
         _detail_layout(ws2, 1 + len(res.lines))
-        _put_header(ws2, detail_heads, {0: _legend_note(sc, labels.get(sc) or {})})
+        _put_header(ws2, detail_heads, {1: _legend_note(sc, labels.get(sc) or {})})
         moq_of = {s.sku: s.moq for s in res.skus}
+        # Brand per SKU, not per comparison row: a shared target collapses to one
+        # "A + B" row there, while the detail sheet still lists each SKU.
+        brand_of = {s.sku: s.brand for s in res.skus}
         names = params.get("shop_names") or {}
-        # Positions of the three action columns in the row list below: 需求 (15)
-        # is the rounded need, 可派 STO (16), 開 PO（全期）(17), 缺貨 (18).
-        _STO_COL, _PO_COL, _SHORT_COL = 16, 17, 18
+        # Positions of the three action columns in the row list below: 需求 (16)
+        # is the rounded need, 可派 STO (17), 開 PO（全期）(18), 缺貨 (19).
+        _STO_COL, _PO_COL, _SHORT_COL = 17, 18, 19
         for ln in res.lines:
             reason = ""
             if ln.blocked:
@@ -1151,6 +1195,7 @@ def export_run(
                     f"RP={ln.rp_type}" if ln.rp_type else "未提供 RP Type"
                 ) + f"（需求 {ln.need_qty}）"
             values: List[Any] = [
+                brand_of.get(ln.sku, ""),
                 ln.sku,
                 desc_of.get(ln.sku, ""),
                 ln.shop_code,
@@ -1273,6 +1318,17 @@ def export_run(
         ws3.append(["MOQ", "庫存檔沒有 MOQ 欄，全部當作 1（需求不進位）"])
     elif params.get("has_moq"):
         ws3.append(["MOQ 來源", "店舖庫存檔的 MOQ 欄；每店需求向上取至 MOQ 倍數"])
+    if params.get("has_brand") is False:
+        ws3.append(
+            ["Brand Code", "Target 檔沒有 Brand code 欄，匯出檔的 Brand Code 留空"]
+        )
+    elif params.get("has_brand"):
+        ws3.append(
+            [
+                "Brand Code 來源",
+                "Target 檔的 Brand code 欄，只作識別，不影響任何計算",
+            ]
+        )
     if gate:
         ws3.append(["RP Type 管制店舖", "、".join(sorted(gate))])
         ws3.append(["RP Type 規則", "只有 RP Type = RF 才派貨；ND 或未提供一律 0 件"])
@@ -1371,27 +1427,44 @@ def export_target_template() -> bytes:
     wb = Workbook()
     ws = wb.active
     ws.title = "SKU Target"
+    # Brand code sits right after the name, the way the ops target sheet is
+    # laid out (SKU / SKU DESC / Brand code): it is read as a label and copied
+    # onto the export, not used in any calculation.
     ws.append(
-        ["SKU", "貨品名稱", "Target Qty", "Start date (Promo)", "End date (Promo)"]
+        [
+            "SKU",
+            "貨品名稱",
+            "Brand code",
+            "Target Qty",
+            "Start date (Promo)",
+            "End date (Promo)",
+        ]
     )
     for cell in ws[1]:
         cell.font = _HEAD_FONT
         cell.fill = _HEAD_FILL
-    for sku, name, qty in (
-        ("109991605010", "示範貨品 A", 1200),
-        ("110331002001", "示範貨品 B", 800),
+    for sku, name, brand, qty in (
+        ("109991605010", "示範貨品 A", "BR01", 1200),
+        ("110331002001", "示範貨品 B", "BR02", 800),
     ):
-        ws.append([sku, name, qty, sample_start, sample_end])
+        ws.append([sku, name, brand, qty, sample_start, sample_end])
         # Real date cells shown the way ops writes them (17-Nov-26), so the
         # column can be copied straight out of a live sheet.
-        for col in (4, 5):
+        for col in (5, 6):
             ws.cell(row=ws.max_row, column=col).number_format = "dd-mmm-yy"
-    for col, width in zip("ABCDE", (18, 30, 12, 18, 18)):
+    for col, width in zip("ABCDEF", (18, 30, 12, 12, 18, 18)):
         ws.column_dimensions[col].width = width
 
     note = wb.create_sheet("說明")
     note.append(["SKU", "必填，不可重複"])
     note.append(["Target Qty", "必填，整數"])
+    note.append(
+        [
+            "Brand code",
+            "選填。只作識別，會帶到匯出檔的 SKU 前面（比較表與明細表第一欄），"
+            "不影響任何計算；留空就在匯出檔留空",
+        ]
+    )
     note.append(
         [
             "共用 Target",

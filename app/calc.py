@@ -151,12 +151,16 @@ class SkuTarget:
     ``group`` is the SKU that owns the number in the spreadsheet (the first row
     of the block); every member carries the same key, including the owner, so a
     group is always found by ``target.group``. Standalone SKUs leave it empty.
+
+    ``brand`` is a label from the target sheet, never an input to the numbers.
+    It is carried through to the comparison rows so the export can print it.
     """
 
     sku: str
     target_qty: int
     description: str = ""
     group: str = ""
+    brand: str = ""
 
 
 @dataclass(frozen=True)
@@ -266,6 +270,7 @@ class SkuSummary:
     group: str = ""
     po_qty: int = 0
     po_target: int = 0
+    brand: str = ""
 
     @property
     def enough(self) -> bool:
@@ -1066,6 +1071,7 @@ def compute_scenario(
                 group=target.group,
                 po_qty=total_po,
                 po_target=total_po_target,
+                brand=target.brand,
             )
         )
 
@@ -1209,6 +1215,9 @@ def _merge_group(members: Sequence[SkuSummary]) -> SkuSummary:
         daily_rate=round(sum(member.daily_rate for member in members), 4),
         coverage_status=first.coverage_status,
         group=first.group,
+        # The packs of one product share a brand; the first member's label is
+        # the one the group row shows.
+        brand=first.brand,
         **values,
     )
 
@@ -1239,6 +1248,7 @@ def compare_scenarios(results: Dict[str, ScenarioResult]) -> List[dict]:
                 row = {
                     "sku": merged.sku,
                     "description": merged.description,
+                    "brand": merged.brand,
                     "target_qty": merged.target_qty,
                     "total_stock": merged.total_stock,
                     "shortfall_qty": merged.shortfall_qty,

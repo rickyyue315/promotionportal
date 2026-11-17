@@ -7,7 +7,7 @@
     <h1>派貨明細</h1>
     <div class="desc">
       {{ run.period }} ｜ {{ run.created_at | replace('T',' ') }}
-      {% if selected %}｜ {{ selected.sku }}{% if selected.description %} · {{ selected.description }}{% endif %}
+      {% if selected %}｜ {{ selected.sku }}{% if selected.brand %} · {{ selected.brand }}{% endif %}{% if selected.description %} · {{ selected.description }}{% endif %}
       {% endif %}
     </div>
   </div>

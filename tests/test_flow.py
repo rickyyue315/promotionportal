@@ -164,7 +164,8 @@ def test_full_flow(client):
     assert wb.sheetnames[:4] == ["比較", "明細_A", "明細_B", "明細_C"]
     ws = wb["比較"]
     header = [c for c in next(ws.iter_rows(values_only=True))]
-    assert header[0] == "SKU"
+    # Brand Code leads the sheet so the brand is read before the article number.
+    assert header[:2] == ["Brand Code", "SKU"]
     assert "A 派貨" in header
     assert "派貨目標" in header
     assert "RP 不派" in header
@@ -174,7 +175,7 @@ def test_full_flow(client):
     # warehouse works from, so an empty sheet would be a silent failure.
     detail_rows = list(wb["明細_A"].iter_rows(values_only=True))
     assert len(detail_rows) == 1 + 10 * 20
-    assert detail_rows[0][:3] == ("SKU", "貨品名稱", "店舖")
+    assert detail_rows[0][:3] == ("Brand Code", "SKU", "貨品名稱")
 
     # --- the only trace a calculation leaves is a timestamp ---
     usage = db.list_usage(limit=5)
@@ -250,6 +251,7 @@ def test_target_template_carries_the_promo_dates(client):
     assert header == (
         "SKU",
         "貨品名稱",
+        "Brand code",
         "Target Qty",
         "Start date (Promo)",
         "End date (Promo)",
@@ -261,6 +263,7 @@ def test_target_template_carries_the_promo_dates(client):
     assert parsed.promo_start == date(2026, 11, 17)
     assert parsed.promo_end == date(2026, 11, 26)
     assert [row.sku for row in parsed.rows] == ["109991605010", "110331002001"]
+    assert [row.brand for row in parsed.rows] == ["BR01", "BR02"]
 
 
 def test_share_import_reads_region_and_om(client):
@@ -934,9 +937,9 @@ def test_shared_target_flows_through_to_the_result(client):
     assert export.status_code == 200
     book = load_workbook(io.BytesIO(export.content))
     compare = [c.value for c in book["比較"][2]]
-    assert compare[0] == "111058302001 + 111058302002"
-    # 推廣時期 (2) and 日數 (3) come before the quantities now.
-    assert compare[4] == 4000
+    assert compare[1] == "111058302001 + 111058302002"
+    # Brand Code leads, then 推廣時期 (3) and 日數 (4) before the quantities.
+    assert compare[5] == 4000
     params = [row for row in book["參數"].iter_rows(values_only=True)]
     assert any(row[0] == "共用 Target" for row in params)
 
@@ -1149,7 +1152,7 @@ def test_vendor_po_covers_the_whole_promotion(client):
     basis = head.index("分配基準")
     full = head.index("全期目標（12日 Target）")
     windowed = head.index("分配數量（4日 Target）")
-    by_shop = {r[2]: r for r in rows[1:]}
+    by_shop = {r[3]: r for r in rows[1:]}
     assert by_shop["HB02"][basis] == "全期"
     assert by_shop["HB01"][basis] == "派貨期"
     # 全期目標 = the shop's share of the whole promotion target, whoever
@@ -1223,11 +1226,11 @@ def test_export_colours_what_has_to_be_raised(client):
     po = head.index("開 PO（全期）") + 1
     short = head.index("缺貨") + 1
     name_col = head.index("店舖名稱") + 1
-    rows = {ws.cell(row=r, column=3).value: r for r in range(2, ws.max_row + 1)}
+    rows = {ws.cell(row=r, column=4).value: r for r in range(2, ws.max_row + 1)}
 
     # The shop name sits right after its code: the sheet is read by people who
     # know "HB01 倉貨店" better than "HB01".
-    assert head[3] == "店舖名稱"
+    assert head[4] == "店舖名稱"
     assert ws.cell(row=rows["HB01"], column=name_col).value == "HB01 倉貨店"
     assert ws.cell(row=rows["HB02"], column=name_col).value == "HB02 行貨店"
 
@@ -1249,17 +1252,17 @@ def test_export_colours_what_has_to_be_raised(client):
 
     # Layout: the identifying columns stay put, the header wraps, and the
     # filter covers exactly the rows that exist.
-    assert ws.freeze_panes == "E2"
-    assert ws.auto_filter.ref == f"A1:X{1 + len(rows)}"
+    assert ws.freeze_panes == "F2"
+    assert ws.auto_filter.ref == f"A1:Y{1 + len(rows)}"
     assert ws.row_dimensions[1].height >= 40
     assert ws["A1"].alignment.wrap_text is True
-    assert ws.column_dimensions["B"].width >= 30
+    assert ws.column_dimensions["C"].width >= 30
 
     compare = wb2["比較"]
     chead = [c.value for c in compare[1]]
     cpo = chead.index("A 開 PO（全期）") + 1
     assert compare.cell(row=2, column=cpo).fill.fgColor.rgb == "FFFFFF00"
-    assert compare.freeze_panes == "C2"
+    assert compare.freeze_panes == "D2"
     wb2.close()
 
 
@@ -1315,18 +1318,18 @@ def test_export_states_the_promo_window_on_every_row(client):
     book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
     ws = book["比較"]
     head = [c.value for c in ws[1]]
-    assert head[2] == "推廣時期"
-    assert head[3] == "日數"
+    assert head[3] == "推廣時期"
+    assert head[4] == "日數"
 
     row = [c.value for c in ws[2]]
-    assert row[2] == "2027-08-02 → 2027-08-11"
-    assert row[3] == "10 日（派 4 日）"
-    assert row[4] == 700
-    assert row[5] == 280                  # 700 × 4/10
+    assert row[3] == "2027-08-02 → 2027-08-11"
+    assert row[4] == "10 日（派 4 日）"
+    assert row[5] == 700
+    assert row[6] == 280                  # 700 × 4/10
 
     # The hover note says which of the two day counts scales the target.
-    assert ws["D1"].comment is not None
-    assert "4/10" in ws["D1"].comment.text
+    assert ws["E1"].comment is not None
+    assert "4/10" in ws["E1"].comment.text
 
 
 def test_supply_source_column_missing_is_reported(client):
@@ -1665,6 +1668,107 @@ def test_result_and_excel_say_what_abc_mean(client):
 
     # The comparison header stays short; the plan name rides on its hover note.
     header = book["比較"]
-    assert header["Q1"].value == "A 需求"
-    assert header["Q1"].comment is not None
-    assert "恆常推廣" in header["Q1"].comment.text
+    assert header["R1"].value == "A 需求"
+    assert header["R1"].comment is not None
+    assert "恆常推廣" in header["R1"].comment.text
+
+
+def test_brand_code_is_read_as_a_label():
+    """Brand code is copied from the sheet, never derived or guessed.
+
+    Ops asked for it because an article number alone does not say whose SKU a
+    line is; it is a label on the export, so nothing about the numbers may
+    depend on it.
+    """
+    from openpyxl import Workbook
+
+    from app import excel_io
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "SKU DESC", "Brand code", "Target Qty"])
+    ws.append(["109991605010", "潔面乳 120ml", "BR01", 100])
+    ws.append(["110331002001", "精華 30ml", 12, 200])  # a numeric code cell
+    buf = io.BytesIO()
+    wb.save(buf)
+
+    parsed = excel_io.parse_target_file(buf.getvalue())
+    assert parsed.ok, parsed.errors
+    assert parsed.mapped["brand"] == "Brand code"
+    assert [row.brand for row in parsed.rows] == ["BR01", "12"]
+
+    # A sheet without the column keeps working; the export just leaves it blank.
+    plain = Workbook()
+    ws2 = plain.active
+    ws2.append(["SKU", "Target Qty"])
+    ws2.append(["109991605010", 100])
+    buf2 = io.BytesIO()
+    plain.save(buf2)
+
+    parsed2 = excel_io.parse_target_file(buf2.getvalue())
+    assert parsed2.ok, parsed2.errors
+    assert parsed2.mapped["brand"] == ""
+    assert parsed2.rows[0].brand == ""
+
+
+def test_brand_code_leads_the_sku_in_the_export(client):
+    """The export puts Brand Code in front of SKU on both sheets."""
+    period = "2027-10"
+    sku = "111058402001"
+
+    db.upsert_shop("HD01", "HD01 門市", "HK")
+    db.save_shares(period, "A", {"HD01": 1.0}, "tester")
+
+    from openpyxl import Workbook, load_workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "SKU DESC", "Brand code", "Target Qty"])
+    ws.append([sku, "面膜 5片裝", "BR07", 200])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wide = Workbook()
+    ws2 = wide.active
+    ws2.append(["SKU", "店舖", "庫存"])
+    ws2.append([sku, "HD01", 40])
+    stock = io.BytesIO()
+    wide.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run is not None
+    assert run.params["has_brand"] is True
+    assert run.results["A"].skus[0].brand == "BR07"
+
+    # On screen too, so the column can be checked without downloading anything.
+    page = client.get(f"/run/{token}")
+    assert "BR07" in page.text
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    compare = list(book["比較"].iter_rows(values_only=True))
+    assert compare[0][:2] == ("Brand Code", "SKU")
+    assert compare[1][:2] == ("BR07", sku)
+
+    detail = list(book["明細_A"].iter_rows(values_only=True))
+    assert detail[0][:3] == ("Brand Code", "SKU", "貨品名稱")
+    assert detail[1][0] == "BR07"
+    assert detail[1][1] == sku
+
+    notes = {
+        row[0]: row[1]
+        for row in book["參數"].iter_rows(values_only=True)
+    }
+    assert "Brand code" in notes["Brand Code 來源"]

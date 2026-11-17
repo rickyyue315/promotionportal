@@ -32,6 +32,21 @@ SKUS = [
 # sample exercises the PO route as well as the STO one.
 VENDOR_SHOPS = {"HK05": "1", "MO02": "4"}
 
+# Brand codes for the sample target sheet, so the export shows the Brand Code
+# column populated the way a real file would.
+BRANDS = {
+    "109991605010": "BR01",
+    "110331002001": "BR01",
+    "110552003014": "BR02",
+    "110773004028": "BR02",
+    "110994005003": "BR03",
+    "111225006017": "BR03",
+    "111446007021": "BR04",
+    "111667008009": "BR04",
+    "111888009033": "BR05",
+    "112009010012": "BR05",
+}
+
 HEAD = Font(bold=True)
 FILL = PatternFill("solid", fgColor="EDF1F5")
 
@@ -95,10 +110,20 @@ def targets() -> Path:
     # The promo window is repeated on every line, the way ops actually fills
     # it, so the portal can take the dates from here instead of the form. The
     # window matches the tests' PROMO dict: 4 days, sent as 4 days.
-    _head(ws, ["SKU", "貨品名稱", "Target Qty", "Start date (Promo)", "End date (Promo)"])
+    _head(
+        ws,
+        [
+            "SKU",
+            "貨品名稱",
+            "Brand code",
+            "Target Qty",
+            "Start date (Promo)",
+            "End date (Promo)",
+        ],
+    )
     for sku, name, qty, _moq in SKUS:
-        ws.append([sku, name, qty, "02-Nov-26", "05-Nov-26"])
-    for col, width in zip("ABCDE", (18, 28, 12, 18, 18)):
+        ws.append([sku, name, BRANDS.get(sku, ""), qty, "02-Nov-26", "05-Nov-26"])
+    for col, width in zip("ABCDEF", (18, 28, 12, 12, 18, 18)):
         ws.column_dimensions[col].width = width
     path = OUT / "sample_target.xlsx"
     wb.save(path)

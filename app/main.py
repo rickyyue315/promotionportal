@@ -693,6 +693,7 @@ async def run_create(
             target_qty=row.qty,
             description=row.description,
             group=row.group,
+            brand=row.brand,
         )
         for row in parsed_t.rows
     ]
@@ -841,6 +842,9 @@ async def run_create(
         "warehouse_sites": sorted(warehouse_codes),
         "has_sales": has_sales,
         "has_moq": bool(parsed_s.mapped.get("moq")),
+        # Whether the target sheet carried Brand code: the export always prints
+        # the column, so 參數 has to say whether a blank means "not provided".
+        "has_brand": bool(parsed_t.mapped.get("brand")),
         "has_supply_source": has_supply,
         # Whether the stock figure includes Unrestr. Consignment: the result
         # page and the export both state the 口徑 instead of leaving the reader

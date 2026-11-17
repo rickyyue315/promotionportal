@@ -214,7 +214,7 @@
       <label style="display:flex;align-items:center;gap:7px;font-size:12.5px;color:var(--text-2);font-weight:400">
         <input type="checkbox" id="onlyShort"> 只看不夠貨
       </label>
-      <input class="input" id="skuFilter" placeholder="搜尋 SKU／名稱" style="width:180px;padding:5px 9px">
+      <input class="input" id="skuFilter" placeholder="搜尋 SKU／名稱／品牌" style="width:180px;padding:5px 9px">
     </div>
   </header>
   <div class="body flush">
@@ -249,8 +249,8 @@
           {% set short = row.shortfall_qty > 0 %}
           {% set s0 = (row.scenarios.values() | list | first) %}
           <tr class="{{ 'is-short' if short }}" data-short="{{ 1 if short else 0 }}"
-              data-search="{{ (row.sku ~ ' ' ~ row.description) | lower }}">
-            <td class="mono">{{ row.sku }}{% if row.group_size %}<span class="badge neutral" style="margin-left:6px">貨組 {{ row.group_size }}</span>{% endif %}</td>
+              data-search="{{ (row.sku ~ ' ' ~ row.description ~ ' ' ~ row.brand) | lower }}">
+            <td class="mono">{{ row.sku }}{% if row.group_size %}<span class="badge neutral" style="margin-left:6px">貨組 {{ row.group_size }}</span>{% endif %}{% if row.brand %}<span style="display:block;font-size:11px;color:var(--muted)" title="Brand code（來自 Target 檔）">{{ row.brand }}</span>{% endif %}</td>
             <td class="dim">{{ row.description or '—' }}</td>
             <td class="num">{{ row.target_qty | num }}</td>
             <td class="num">{{ s0.dispatch_target | num if s0 else '—' }}</td>
