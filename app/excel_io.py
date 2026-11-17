@@ -209,8 +209,8 @@ class StockRow:
     for the 4-day cover calculation, not stock. ``moq`` rides along because the
     minimum order is a packaging property of the SKU, which SAP keeps on this
     row rather than on the target list. ``supply_source`` says who supplies the
-    shop — 1 行貨 (buyer's PO), 2／4 倉貨 (STO from D001) — so the row can be
-    routed correctly.
+    shop — 1／4 行貨 (buyer's PO; 4 is booked through D001 but is still vendor
+    stock), 2 倉貨 (STO from D001) — so the row can be routed correctly.
     """
 
     sku: str
@@ -1284,9 +1284,20 @@ def export_run(
             [
                 "Supply Source 規則",
                 "行貨由 Buyer 開 PO，不佔 D001 倉存、不計入缺貨；"
-                "2／4（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
+                "2（或其他代碼）為倉貨，由 RP 開 STO，受倉存上限限制",
             ]
         )
+        if params.get("supply_four_shops"):
+            ws3.append(
+                [
+                    "Supply Source 4",
+                    "貨經 D001 過數再到店舖（系統流程），但屬行貨："
+                    "由 Buyer 開 PO，不佔 D001 倉存、不計入缺貨（"
+                    + "、".join(params["supply_four_shops"][:6])
+                    + ("…" if len(params["supply_four_shops"]) > 6 else "")
+                    + "）",
+                ]
+            )
         ws3.append(
             [
                 "行貨計算基準",
@@ -1418,8 +1429,8 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
     note.append(
         [
-            "長表可加一欄 Supply Source；1 是行貨（Buyer 開 PO，不佔 D001 倉存），"
-            "2／4 是倉貨（RP 由 D001 開 STO，4 一樣經 D001 派貨）",
+            "長表可加一欄 Supply Source；1／4 是行貨（Buyer 開 PO，不佔 D001 倉存；"
+            "4 經 D001 過數但貨源仍屬 vendor），2 是倉貨（RP 由 D001 開 STO）",
         ]
     )
     note.append(

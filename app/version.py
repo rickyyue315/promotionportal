@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
-APP_VERSION = "1.18.0"
+APP_VERSION = "1.18.1"
 
 # Bump this whenever APP_VERSION changes; the README keeps the full history.
 RELEASED_AT = "2026-11-17"

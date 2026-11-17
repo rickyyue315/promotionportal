@@ -86,22 +86,23 @@
       <label class="field" style="max-width:420px">
         <span>屬於「行貨」的 Supply Source 代碼</span>
         <input class="input" type="text" name="vendor_supply_sources" value="{{ supply_raw }}"
-               placeholder="1">
+               placeholder="1,4">
       </label>
       <p class="dim" style="font-size:12.5px;margin:0 0 12px">
-        多個代碼用逗號分隔，預設 <span class="mono">1</span>。
-        其餘代碼（包括 <span class="mono">2</span>、<span class="mono">4</span>、空白或未識別）
-        一律當作倉貨。
+        多個代碼用逗號分隔，預設 <span class="mono">1,4</span>。
+        其餘代碼（包括 <span class="mono">2</span>、空白或未識別）一律當作倉貨。
       </p>
 
       <div class="alert info" style="margin-bottom:14px">
         <span class="tag">規則</span>
         <span>
-          <strong>行貨（1）</strong>：貨不經 D001，需求全數列為「需開 PO」，
+          <strong>行貨（1／4）</strong>：貨源屬 vendor，需求全數列為「需開 PO」，
           要由 <strong>Buyer 開 PO</strong> 為店舖落單；不佔貨倉配額，亦不計入「倉存缺貨」。
           PO 覆蓋整段推廣，所以行貨店舖的分配數量用<strong>全期 Target</strong> 計算，<u>不受派貨日數縮小</u>。<br>
-          <strong>倉貨（2／4）</strong>：由 <strong>RP 開 STO</strong> 從 D001 取貨，受倉存上限限制，
-          分配數量只計首「派貨日數」的目標。<u>4 一樣經 D001 再派貨</u>，所以同 2 無分別。<br>
+          <strong>倉貨（2）</strong>：由 <strong>RP 開 STO</strong> 從 D001 取貨，受倉存上限限制，
+          分配數量只計首「派貨日數」的目標。<br>
+          <u>Supply Source 4 較特別</u>：貨會經 D001 過數再到店舖（系統流程需要），
+          但<strong>不是倉貨</strong> —— 仍然由 Buyer 開 PO、不佔 D001 倉存、不計入倉存缺貨。<br>
           D001 自己的 Supply Source 一律忽略。
         </span>
       </div>

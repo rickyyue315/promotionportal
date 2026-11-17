@@ -99,7 +99,7 @@
               {% if supply.has_column %}
               <td>
                 {% if ln.vendor %}
-                <span class="badge warn" title="Supply Source {{ ln.supply_source }}：行貨，由 Buyer 開 PO">{{ ln.supply_source }} 行貨</span>
+                <span class="badge warn" title="Supply Source {{ ln.supply_source }}：行貨，由 Buyer 開 PO{% if ln.supply_source == '4' %}；經 D001 過數（系統流程），不佔倉存{% endif %}">{{ ln.supply_source }} 行貨</span>
                 {% else %}
                 <span class="badge neutral" title="Supply Source {{ ln.supply_source or '未提供' }}：倉貨，由 D001 開 STO">{{ ln.supply_source or '—' }} 倉貨</span>
                 {% endif %}

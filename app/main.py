@@ -770,7 +770,7 @@ async def run_create(
         for res in results.values():
             res.warnings.append(
                 "庫存檔沒有 Supply Source 欄位，全部店舖當作倉貨（由 D001 開 STO）；"
-                "如有行貨店舖，請在檔案加一欄 Supply Source（1 行貨；2／4 倉貨）"
+                "如有行貨店舖，請在檔案加一欄 Supply Source（1／4 行貨；2 倉貨）"
             )
 
     if parsed_s.rows and not parsed_s.mapped.get("moq"):
@@ -815,6 +815,16 @@ async def run_create(
     # is handed to runstore (memory, a couple of hours) so the result page,
     # the drill-downs and the export work; the database only learns that a
     # calculation happened.
+    # Which shops actually took the 4 route, so the page explains 過數 only when
+    # it applies instead of on every run.
+    four_shops = sorted(
+        {
+            line.shop_code
+            for res in results.values()
+            for line in res.lines
+            if line.supply_source == "4"
+        }
+    )
     params = {
         "scenarios": ready,
         "share_totals": {sc: sum(shares[sc].values()) for sc in ready},
@@ -839,6 +849,7 @@ async def run_create(
         # Snapshot the rule as it was applied: changing the setting later must
         # not relabel a batch that was already computed.
         "vendor_supply_sources": vendors if has_supply else [],
+        "supply_four_shops": four_shops,
         # How each shared target was split, so the result page and the export
         # can show the basis without re-reading either file.
         "shared_targets": shared_targets,

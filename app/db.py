@@ -60,16 +60,18 @@ WAREHOUSE_KEY = "warehouse_sites"
 DEFAULT_WAREHOUSE = "D001"
 
 # Supply source codes meaning 行貨: the shop is supplied by the vendor, so the
-# buyer raises a PO and D001 is not involved. Everything else — 2 倉貨, 4
-# （經 D001 再派貨，2026-11-17 澄清）, blank, unknown — is supplied from the
-# warehouse on an STO.
+# buyer raises a PO and D001 is not involved. 4 is 行貨 as well — its goods are
+# booked through D001 on the way to the shop, but that is an accounting step,
+# not warehouse stock. Everything else — 2 倉貨, blank, unknown — is supplied
+# from the warehouse on an STO.
 SUPPLY_KEY = "vendor_supply_sources"
-DEFAULT_SUPPLY = "1"
+DEFAULT_SUPPLY = "1,4"
 
-# The default used to be "1,4". Databases created before 4 was reclassified
-# still store that value, so it is corrected once — the marker keeps the fix
-# from rewriting a deliberate setting on every boot.
+# v1.18.0 briefly routed 4 through the warehouse and rewrote the stored default
+# to "1". That was wrong, so the rewrite is undone once on the databases it
+# touched; SUPPLY_FIX_KEY is the marker that release left behind.
 SUPPLY_FIX_KEY = "supply_default_fixed"
+SUPPLY_RESTORE_KEY = "supply_default_restored"
 
 DEFAULT_SCENARIO_SETTINGS: Dict[str, Dict[str, Any]] = {
     "A": {"label": "恆常推廣", "remark": "", "optional": 0},
@@ -243,30 +245,34 @@ def _seed_settings(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO setting (key, value) VALUES (?, ?)",
         (SUPPLY_KEY, DEFAULT_SUPPLY),
     )
-    _fix_supply_default(conn)
+    _restore_supply_default(conn)
 
 
-def _fix_supply_default(conn: sqlite3.Connection) -> None:
-    """Rewrite the historical "1,4" default once, when 4 became 倉貨.
+def _restore_supply_default(conn: sqlite3.Connection) -> None:
+    """Undo v1.18.0's one-off rewrite of the 行貨 default from "1,4" to "1".
 
-    Done as a migration rather than a silent read-time mapping so the admin page
-    shows the codes that are actually applied — a stored "1,4" that behaved like
-    "1" is exactly the kind of hidden difference this app tries not to have.
+    Only a database that actually ran that release carries its marker (the
+    seed writes it even when nothing was rewritten), and only a value that is
+    still exactly "1" is touched — an admin who picked something else since
+    then keeps it. A fresh database already seeds "1,4" and never enters here.
     """
     if conn.execute(
-        "SELECT 1 FROM setting WHERE key = ?", (SUPPLY_FIX_KEY,)
+        "SELECT 1 FROM setting WHERE key = ?", (SUPPLY_RESTORE_KEY,)
     ).fetchone():
         return
+    rewritten = conn.execute(
+        "SELECT 1 FROM setting WHERE key = ?", (SUPPLY_FIX_KEY,)
+    ).fetchone()
     row = conn.execute(
         "SELECT value FROM setting WHERE key = ?", (SUPPLY_KEY,)
     ).fetchone()
-    if row and _split_codes(row["value"]) == ["1", "4"]:
+    if rewritten and row and _split_codes(row["value"]) == ["1"]:
         conn.execute(
             "UPDATE setting SET value = ? WHERE key = ?", (DEFAULT_SUPPLY, SUPPLY_KEY)
         )
     conn.execute(
         "INSERT OR REPLACE INTO setting (key, value) VALUES (?, ?)",
-        (SUPPLY_FIX_KEY, "1"),
+        (SUPPLY_RESTORE_KEY, "1"),
     )
 
 

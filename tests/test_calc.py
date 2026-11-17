@@ -690,7 +690,7 @@ class TestSharedTarget:
 
 
 class TestSupplySource:
-    """1 行貨 is a PO for the buyer; 2／4 倉貨 is an STO from D001."""
+    """1／4 行貨 is a PO for the buyer; 2 倉貨 is an STO from D001."""
 
     def test_codes_are_normalised(self):
         for raw in (2, 2.0, "2", " 2 ", "2.0"):
@@ -698,9 +698,9 @@ class TestSupplySource:
         assert supply_code(None) == ""
         assert supply_code(True) == ""
 
-    def test_only_one_is_vendor(self):
+    def test_vendor_codes_are_one_and_four(self):
         assert supply_mode("1") == SUPPLY_VENDOR
-        assert supply_mode("4") == SUPPLY_WAREHOUSE         # 4 經 D001 派貨
+        assert supply_mode("4") == SUPPLY_VENDOR         # 經 D001 過數，但仍是行貨
         assert supply_mode("2") == SUPPLY_WAREHOUSE
         assert supply_mode("") == SUPPLY_WAREHOUSE          # no column / blank
         assert supply_mode("9") == SUPPLY_WAREHOUSE         # unrecognised
@@ -709,9 +709,9 @@ class TestSupplySource:
         assert supply_mode("3", ["3"]) == SUPPLY_VENDOR
         assert supply_mode("1", ["3"]) == SUPPLY_WAREHOUSE
 
-    def test_code_four_draws_on_the_warehouse(self):
-        # 4 used to be treated as 行貨. It is dispatched through D001, so it is
-        # capped like any warehouse shop and never becomes a PO line.
+    def test_code_four_is_a_po_that_never_touches_the_warehouse(self):
+        # 4 goes through D001 on paper only: the goods come from the vendor on a
+        # PO, so the warehouse's 50 units are all the 倉貨 shop can get.
         res = compute_scenario(
             "A",
             ["S1", "S2"],
@@ -722,14 +722,17 @@ class TestSupplySource:
             supply_by_sku={"K": {"S1": "4", "S2": "2"}},
         )
         by_shop = {ln.shop_code: ln for ln in res.lines}
-        assert by_shop["S1"].vendor is False
-        assert by_shop["S1"].po_qty == 0
-        # The 50 units are shared by the two warehouse shops, never handed out
-        # twice: 25 each, with the remainder going to one of them.
-        assert sum(ln.dispatch_qty for ln in res.lines) == 50
-        assert res.skus[0].po_qty == 0
-        assert res.skus[0].short_qty == 150
-        # A known warehouse code is not an "unrecognised code".
+        assert by_shop["S1"].vendor is True
+        assert by_shop["S1"].po_qty == 100
+        assert by_shop["S1"].sto_qty == 0
+        assert by_shop["S1"].short_qty == 0
+        assert by_shop["S2"].dispatch_qty == 50
+
+        sku = res.skus[0]
+        assert sku.po_qty == 100
+        assert sku.short_qty == 50              # only the warehouse route is short
+        # The one route that looks like a warehouse movement is spelled out.
+        assert any("D001 過數" in w for w in res.warnings)
         assert not any("未設定的代碼" in w for w in res.warnings)
 
     def test_vendor_shop_is_not_capped_by_the_warehouse(self):
@@ -754,6 +757,8 @@ class TestSupplySource:
         assert sku.sto_qty == 50
         assert sku.total_dispatch == 150
         assert sku.short_qty == 50              # only the warehouse route is short
+        # 1 is the plain vendor route: no 過數 note on its runs.
+        assert not any("D001 過數" in w for w in res.warnings)
 
     def test_vendor_units_do_not_eat_the_warehouse_quota(self):
         # Without the split, S2 would have received only part of its 60 because
@@ -765,13 +770,14 @@ class TestSupplySource:
             [SkuTarget("K", 120)],
             {},
             warehouse_by_sku={"K": 60},
-            supply_by_sku={"K": {"PO1": "1", "WH1": "2"}},
+            supply_by_sku={"K": {"PO1": "4", "WH1": "2"}},
         )
         by_shop = {ln.shop_code: ln for ln in res.lines}
         assert by_shop["PO1"].po_qty == 60
         assert by_shop["WH1"].dispatch_qty == 60
         assert res.skus[0].short_qty == 0
         assert any("行貨" in w and "開 PO" in w for w in res.warnings)
+        assert any("D001 過數" in w for w in res.warnings)   # 4 是行貨但經 D001
 
     def test_blank_supply_source_keeps_the_old_behaviour(self):
         kwargs = dict(warehouse_by_sku={"K": 120})
@@ -854,7 +860,7 @@ class TestVendorFullPeriodTarget:
             promo=PromoWindow(
                 start=date(2026, 11, 17), end=date(2026, 11, 26), dispatch_days=4
             ),
-            supply_by_sku={"K": {"V1": "1"}},
+            supply_by_sku={"K": {"V1": "4"}},
         )
         line = res.lines[0]
         assert line.alloc_qty == 1000

@@ -134,11 +134,13 @@ RP_DISPATCHABLE = "RF"  # the only RP Type that unlocks dispatch at a gated shop
 
 SUPPLY_WAREHOUSE = "warehouse"  # 倉貨: D001 -> shop, RP raises an STO
 SUPPLY_VENDOR = "vendor"  # 行貨: vendor -> shop, buyer raises a PO
-# Only 1 is 行貨. 4 is dispatched through D001 as well, so it behaves like 2 —
-# the user corrected this on 2026-11-17 after seeing 4 handled as a PO.
-DEFAULT_VENDOR_SOURCES = ("1",)
-# Codes we know to be warehouse-supplied even though they are not the plain "2".
-# Kept so the "unrecognised code" warning only fires for codes nobody explained.
+# Supply source codes meaning 行貨. 1 is the plain vendor route; 4 is 行貨 too
+# but its goods are booked through D001 on the way to the shop — an accounting
+# step, not warehouse stock, so it still never draws on D001 (user, 2026-11-17).
+DEFAULT_VENDOR_SOURCES = ("1", "4")
+# Codes we know and route without guessing, so the "unrecognised code" warning
+# only fires for codes nobody has explained. 4 falls back to warehouse only when
+# an admin deliberately takes it out of the 行貨 list.
 KNOWN_WAREHOUSE_SOURCES = ("2", "4")
 
 
@@ -432,10 +434,11 @@ def supply_mode(
 ) -> str:
     """Which route a shop takes for this SKU: vendor (PO) or warehouse (STO).
 
-    Only the code configured as 行貨 (``1`` by default) means vendor. ``2`` is
-    倉貨, and so is ``4`` — that code is dispatched through D001 as well — and so
-    is anything blank or unrecognised. Blank has always meant warehouse: that is
-    what the app did before Supply source existed, and it keeps a file without
+    Only the codes configured as 行貨 (``1`` and ``4`` by default) mean vendor.
+    ``4`` is the odd one: the goods are booked through D001 on their way to the
+    shop, but they come from the vendor on a buyer's PO, so they are not stock
+    the warehouse can promise. ``2`` is 倉貨, and so is anything blank or
+    unrecognised — blank has always meant warehouse, which keeps a file without
     the column behaving exactly as before. The caller warns when the fallback is
     used, so the assumption never stays silent.
     """
@@ -774,6 +777,7 @@ def compute_scenario(
     short_units = 0
     missing_warehouse: List[str] = []
     vendor_shops: set = set()
+    four_shops: set = set()
     po_units = 0
     odd_sources: set = set()
 
@@ -847,6 +851,8 @@ def compute_scenario(
 
             if vendor:
                 vendor_shops.add(shop)
+                if code == "4":
+                    four_shops.add(shop)
             elif code and code.upper() not in known_wh and code.upper() not in vendors:
                 odd_sources.add(code)
 
@@ -1095,6 +1101,15 @@ def compute_scenario(
             + ("…" if len(vendor_shops) > 6 else "")
             + "）"
         )
+        if four_shops:
+            # The one route that looks like a warehouse movement but is not:
+            # say it only when a line actually uses 4, so the note does not turn
+            # up on every run just because 4 is in the configured list.
+            warn.append(
+                f"Supply Source 4 用於 {len(four_shops)} 間店舖：貨會經 D001 過數再到店舖"
+                "（系統流程），但貨源屬行貨 — 由 Buyer 開 PO，"
+                "不佔 D001 倉存、不計入倉存缺貨"
+            )
     if odd_sources:
         warn.append(
             "Supply Source 出現未設定的代碼（"

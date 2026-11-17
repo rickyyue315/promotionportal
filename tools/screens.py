@@ -338,7 +338,7 @@ def main() -> None:
             1300,
         )
 
-        # 行貨 (Supply source 1) next to 倉貨: the PO worklist.
+        # 行貨 (Supply source 1／4) next to 倉貨: the PO worklist.
         supply_run = _supply_demo(c)
         shoot(c, f"/run/{supply_run}", "15_result_supply", 1600)
         shoot(

@@ -962,7 +962,7 @@ def _sap_supply_bytes(rows) -> bytes:
 
 
 def test_supply_source_sends_vendor_shops_to_a_po(client):
-    """1 行貨 goes on a PO; only the warehouse shops compete for D001."""
+    """1／4 行貨 goes on a PO; only the warehouse shop competes for D001."""
     period = "2027-04"
     sku = "111058303001"
 
@@ -1004,7 +1004,7 @@ def test_supply_source_sends_vendor_shops_to_a_po(client):
 
     run = runstore.get(token)
     assert run.params["has_supply_source"] is True
-    assert run.params["vendor_supply_sources"] == ["1"]
+    assert run.params["vendor_supply_sources"] == ["1", "4"]
 
     lines = {ln.shop_code: ln for ln in run.results["A"].lines}
     vendor = lines["HA02"]
@@ -1080,7 +1080,7 @@ def test_vendor_po_covers_the_whole_promotion(client):
         [
             (sku, "精華", "D001", "2", 300),
             (sku, "精華", "HB01", "2", 0),
-            (sku, "精華", "HB02", "1", 0),   # 行貨
+            (sku, "精華", "HB02", "4", 0),   # 行貨（經 D001 過數）
         ]
     )
 
@@ -1121,10 +1121,14 @@ def test_vendor_po_covers_the_whole_promotion(client):
     assert summary.po_target == 600
     assert summary.dispatch_target == 400
     assert any("全期" in w for w in run.params["warnings"]["A"])
+    # 4 is the route that passes through D001 without being warehouse stock.
+    assert run.params["supply_four_shops"] == ["HB02"]
+    assert any("D001 過數" in w for w in run.params["warnings"]["A"])
 
     page = client.get(f"/run/{token}")
     assert page.status_code == 200
     assert "需開 PO（行貨 · 全期）" in page.text
+    assert "經 D001 過數" in page.text
 
     detail = client.get(f"/run/{token}/detail?scenario=A&sku={sku}")
     assert detail.status_code == 200
@@ -1186,7 +1190,7 @@ def test_export_colours_what_has_to_be_raised(client):
         [
             (sku, "面膜", "D001", "2", 50),
             (sku, "面膜", "HB01", "2", 0),
-            (sku, "面膜", "HB02", "1", 0),
+            (sku, "面膜", "HB02", "4", 0),
         ]
     )
 
@@ -1388,7 +1392,7 @@ def test_supply_source_codes_are_configurable(client):
         assert "1,4,5" in page.text
     finally:
         db.set_setting(db.SUPPLY_KEY, db.DEFAULT_SUPPLY)
-    assert db.vendor_supply_sources() == ["1"]
+    assert db.vendor_supply_sources() == ["1", "4"]
 
 
 # ---------------------------------------------------------------------------
