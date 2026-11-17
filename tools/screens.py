@@ -306,7 +306,7 @@ def main() -> None:
         print("rendering:")
         shoot(c, "/", "01_dashboard", 1250)
         shoot(c, "/admin/shares?period=2026-11&scenario=B", "02_shares", 1250)
-        shoot(c, "/run/new?period=2026-11", "03_upload", 1280)
+        shoot(c, "/run/new?period=2026-11", "03_upload", 1700)
         shoot(c, f"/run/{run_id}", "04_result", 1500)
         shoot(c, f"/run/{run_id}/detail?scenario=A", "05_detail_shops", 1300)
         shoot(c, f"/run/{run_id}/detail?scenario=A&sku=111888009033", "06_detail_sku", 1300)

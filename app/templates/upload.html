@@ -124,7 +124,7 @@
   </section>
 </form>
 
-<div class="grid-2">
+<div class="grid-2" style="align-items:start">
   <section class="card">
     <header><h2>佔比狀態</h2><span class="hint">{{ period }}</span></header>
     <div class="body flush">
@@ -159,18 +159,60 @@
   <section class="card">
     <header><h2>計算邏輯</h2></header>
     <div class="body" style="font-size:13px;color:var(--text-2)">
-      <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。共用 Target 的貨組是先拆回各 SKU 才縮小。</p>
+      <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。共用 Target 的貨組要先拆回各 SKU 才縮小，見下方「共用 Target（貨組）」。</p>
       <p style="margin:0 0 10px"><strong>2. 拆到店舖</strong>　按該餐的店舖佔比分配派貨目標，用最大餘數法確保加起來剛好等於派貨目標。</p>
-      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按庫存檔的 MOQ 向上取至倍數（沒有 MOQ 欄就不進位）。共用 Target 的貨組會先以組的缺口封頂，避免兩個包裝各派一次。</p>
+      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按庫存檔的 MOQ 向上取至倍數（沒有 MOQ 欄就不進位）。</p>
       {% if rp_gate_shops %}
       <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
       {% endif %}
       <p style="margin:0 0 10px"><strong>3c. 貨源</strong>　Supply Source 1／4 是行貨：需求列為「需開 PO」，由 Buyer 落單，不佔 D001；PO 要覆蓋整段推廣，所以行貨店舖用<strong>全期 Target</strong> 計，不按派貨日數縮小。2 是倉貨，由 RP 開 STO，只計首 {{ dispatch_days }} 日。</p>
       <p style="margin:0 0 10px"><strong>4. 倉存上限</strong>　D001 只計 SaSa Net Stock；只有倉貨店舖的需求會撞上限，超過時按比例分配，差額就是缺貨。</p>
       <p style="margin:0"><strong>5. 銷售差距</strong>　日銷 =（上月銷量＋本月銷量）÷ 有紀錄日數（新產品由 Launch Date 起計）；用日銷 × 推廣日數與 Target、及與「庫存＋派貨」比較。</p>
+      <p style="margin:12px 0 0;padding-top:11px;border-top:1px solid var(--border)">
+        SKU 共用一個 Target（貨組）時，第 1 至 4 步會多走幾步 —— 見下方「共用 Target（貨組）怎樣計」。
+      </p>
     </div>
   </section>
 </div>
+
+<section class="card">
+  <header>
+    <h2>共用 Target（貨組）怎樣計</h2>
+    <span class="hint">同一貨品的幾個包裝共用一個 Target 時</span>
+  </header>
+  <div class="body" style="font-size:13px;color:var(--text-2)">
+    <p style="margin:0 0 14px">
+      Target 檔第一行填數量、下面幾行<strong style="color:var(--text)">留空或合併成一格</strong>，這些 SKU 就是一個貨組。那個數量屬於<strong style="color:var(--text)">整組</strong>，不是屬於第一行；空白一律當「與上一行同組」，所以漏填同樣會被併入 —— 結果頁會列出被併入的 SKU。
+    </p>
+
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(430px,1fr));gap:14px 32px">
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">① 先拆回各 SKU（在縮小之前）</div>
+        按<strong style="color:var(--text)">銷量比例</strong>拆：該 SKU 的「上月＋本月 Sold Qty」佔整組的比重。庫存檔沒有銷量數據就改用現有庫存比例，兩者都沒有就平均分。用最大餘數法，加起來<strong style="color:var(--text)">剛好等於整組 Target</strong>（例如 4,000 拆成 2,400／1,600）。用了哪個基礎、每組拆出幾多，結果頁「共用 Target 貨組」會列明。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">② 再各自縮小、拆到店舖</div>
+        每個 SKU 拿自己的份額走第 1、2 步：份額 × 派貨日數 ÷ 推廣日數，再按店舖佔比分配；行貨店舖照樣用全期份額（不縮小）。拆分只做一次，A／B／C、明細與 Excel 都用同一組數字。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">③ 需求以整組封頂（關鍵）</div>
+        同一間店：整組需求 = Σ 分配數量 − Σ（現有庫存＋在途），正數才派，再按各成員自己的需求比例拆回 SKU。沒有這一步，兩個包裝會就同一批缺貨各派一次。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">④ 夠貨按整組判斷</div>
+        店舖現有＋在途＋D001 可派 ≥ <strong style="color:var(--text)">整組</strong> Target（全期，不是縮小後的派貨目標）才叫夠貨（5,000＋1,000 對 4,000 是夠，不會因為 14 片只剩 1,000 就報缺）。差額只寫在「擁有數量那一行」，其他成員顯示 0，總數與使用紀錄不會重複計算。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">⑤ 倉存上限仍逐個 SKU</div>
+        D001 逐個 SKU 封頂，貨組內不互通 —— 一個包裝在倉裡多貨，不會自動補給另一個包裝。這是刻意的：倉存是逐個 SKU 的實物。
+      </div>
+      <div>
+        <div style="font-weight:600;color:var(--text);margin-bottom:2px">⑥ 表上怎樣顯示</div>
+        比較表一行顯示整組（<span class="mono">111058302001 + 111058302002</span>，旁標「貨組 2」）；明細頁與 Excel 明細逐個 SKU，方便照單派貨。
+      </div>
+    </div>
+  </div>
+</section>
 
 <script>
 const startEl = document.getElementById('promoStart');
