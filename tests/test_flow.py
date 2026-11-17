@@ -313,6 +313,7 @@ def test_shares_page_has_a_month_picker_and_an_import_month(client):
     assert 'type="month"' in html
     assert 'id="periodPick"' in html
     assert 'id="importPeriod"' in html
+    assert 'id="importTemplate"' in html
     assert "value=\"2026-11\"" in html
 
     # Months that already hold data are one click away.

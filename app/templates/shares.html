@@ -137,14 +137,16 @@
           <input class="file" type="file" name="file" accept=".xlsx,.xls" required>
         </label>
       </div>
-      <div style="flex:1;display:flex;align-items:flex-end">
+      <div style="flex:1;display:flex;align-items:flex-end;gap:8px;flex-wrap:wrap">
+        <a class="btn" id="importTemplate" href="/admin/shares/template?period={{ period }}"
+           style="margin-bottom:12px" title="下載這個月的範本，已填入該月現有佔比">下載範本</a>
         <button class="btn primary" type="submit" style="margin-bottom:12px">匯入並覆寫</button>
       </div>
     </form>
     <p class="dim" style="font-size:12.5px;margin:6px 0 0">
       佔比檔案沒有月份欄，匯入到哪個月只看上面的「匯入到哪個月」；
       匯入會覆寫 <strong id="importTarget">{{ period }}</strong> 的三個版本。店舖代碼若不存在，會自動加入店舖主檔。
-      建議先按「下載範本」，填好後再上載。
+      建議先按旁邊的「下載範本」（已填入該月 <span id="importTemplateMonth">{{ period }}</span> 的現有佔比），填好後再上載。
     </p>
   </div>
 </section>
@@ -183,15 +185,21 @@ function normalise() {
 refresh();
 
 // The share file has no month column: where it lands is decided by the month
-// field in the import card. Repeat the choice in the note, and ask before
-// overwriting a month other than the one currently on screen.
+// field in the import card. Repeat the choice in the note, ask before
+// overwriting a month other than the one on screen, and keep the template
+// download on the same month so the file it hands back matches the import.
 const importPeriod = document.getElementById('importPeriod');
 const importTarget = document.getElementById('importTarget');
 const importForm = document.getElementById('importForm');
+const importTemplate = document.getElementById('importTemplate');
+const importTemplateMonth = document.getElementById('importTemplateMonth');
 const pagePeriod = '{{ period }}';
 
 function refreshImportMonth() {
-  importTarget.textContent = importPeriod.value || '（未選月份）';
+  const month = importPeriod.value || '（未選月份）';
+  importTarget.textContent = month;
+  importTemplateMonth.textContent = month;
+  importTemplate.href = '/admin/shares/template?period=' + encodeURIComponent(importPeriod.value || pagePeriod);
 }
 importPeriod.addEventListener('input', refreshImportMonth);
 
