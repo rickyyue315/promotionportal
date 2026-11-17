@@ -17,6 +17,7 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from openpyxl import Workbook, load_workbook
 from openpyxl.cell import WriteOnlyCell
+from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
@@ -855,15 +856,22 @@ def _tinted(
     return cell
 
 
-def _put_header(ws, headers: Sequence[str]) -> None:
+def _put_header(
+    ws, headers: Sequence[str], notes: Optional[Dict[int, str]] = None
+) -> None:
+    notes = notes or {}
     cells = []
-    for text in headers:
+    for idx, text in enumerate(headers):
         cell = WriteOnlyCell(ws, value=text)
         cell.font = _HEAD_FONT
         cell.fill = _HEAD_FILL
         # Headings such as 全期目標（10日 Target） are wider than any sensible
         # column, so they wrap instead of being clipped.
         cell.alignment = Alignment(wrap_text=True, vertical="center")
+        # A cell comment keeps the header short while still saying, on hover,
+        # which meal plan "A" is — the workbook is read outside the portal.
+        if notes.get(idx):
+            cell.comment = Comment(notes[idx], "推廣派貨 Portal")
         cells.append(cell)
     ws.append(cells)
 
@@ -917,6 +925,18 @@ def _compare_layout(ws, last_row: int, n_cols: int) -> None:
         ws.column_dimensions[get_column_letter(idx)].width = 9.5
 
 
+def _legend_note(sc: str, meta: Dict[str, str]) -> str:
+    """'A 餐 · 恆常推廣：每月恆常推出的推廣活動。' — the one-line legend.
+
+    Used for the hover note on the comparison header and the rows on 參數, so
+    the workbook explains A／B／C without the reader going back to the portal.
+    """
+    name = (meta.get("label") or "").strip()
+    hint = (meta.get("hint") or meta.get("remark") or "").strip()
+    text = f"{sc} 餐" + (f" · {name}" if name else "")
+    return f"{text}：{hint}" if hint else text
+
+
 def export_run(
     run: dict,
     results: Dict[str, Any],
@@ -943,11 +963,19 @@ def export_run(
     # unlike 派貨目標 or 日銷 which are the same for A/B/C.
     for sc in scenarios:
         headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO（全期）", f"{sc} 缺貨"]
+    # The first column of each block carries the plan's name as a hover note:
+    # "A 需求" alone does not tell a reader outside the portal what A is.
+    fixed_cols = 14
+    notes = {
+        fixed_cols + i * 4: _legend_note(sc, labels.get(sc) or {})
+        for i, sc in enumerate(scenarios)
+        if (labels.get(sc) or {})
+    }
     # Layout has to be set before the first row is written: a write-only sheet
     # flushes its column widths and pane settings with the header row, so
     # anything set afterwards is silently dropped.
     _compare_layout(ws, 1 + len(compare_rows), len(headers))
-    _put_header(ws, headers)
+    _put_header(ws, headers, notes)
 
     for row in compare_rows:
         first = next(iter(row["scenarios"].values()), None)
@@ -1007,7 +1035,7 @@ def export_run(
         ]
         # Before the header row, for the same reason as the comparison sheet.
         _detail_layout(ws2, 1 + len(res.lines))
-        _put_header(ws2, detail_heads)
+        _put_header(ws2, detail_heads, {0: _legend_note(sc, labels.get(sc) or {})})
         moq_of = {s.sku: s.moq for s in res.skus}
         names = params.get("shop_names") or {}
         # Positions of the three action columns in the row list below: 需求 (15)
@@ -1062,6 +1090,11 @@ def export_run(
     ws3 = wb.create_sheet("參數")
     ws3.append(["項目", "值"])
     ws3.append(["期間", run.get("period", "")])
+    # The legend the comparison sheet only implies with "A 需求 / A 派貨": one
+    # row per plan, so the workbook still says what A／B／C are after it leaves
+    # the portal.
+    for sc in scenarios:
+        ws3.append(["餐別", _legend_note(sc, labels.get(sc) or {})])
     ws3.append(["計算時間", run.get("created_at", "")])
     ws3.append(["執行者", run.get("created_by", "")])
     ws3.append(["SKU 數", run.get("n_sku", "")])
@@ -1121,10 +1154,6 @@ def export_run(
         ws3.append(["MOQ", "庫存檔沒有 MOQ 欄，全部當作 1（需求不進位）"])
     elif params.get("has_moq"):
         ws3.append(["MOQ 來源", "店舖庫存檔的 MOQ 欄；每店需求向上取至 MOQ 倍數"])
-    for sc in scenarios:
-        name = (labels.get(sc) or {}).get("label") or ""
-        if name:
-            ws3.append([f"{sc} 餐名稱", name])
     if gate:
         ws3.append(["RP Type 管制店舖", "、".join(sorted(gate))])
         ws3.append(["RP Type 規則", "只有 RP Type = RF 才派貨；ND 或未提供一律 0 件"])

@@ -1429,3 +1429,60 @@ def test_manual_dates_override_the_target_file(client):
     assert run.params["promo_days"] == 4
     # 4 dispatch days of a 4-day promo: the target is not scaled.
     assert run.results["A"].skus[0].dispatch_target == 4000
+
+
+def test_legend_note_prefers_the_written_remark():
+    """餐別與規則 的備註 wins; the built-in gloss is only a fallback."""
+    from app.excel_io import _legend_note
+
+    assert (
+        _legend_note("A", {"label": "恆常推廣", "hint": "只在每月第一個星期五推"})
+        == "A 餐 · 恆常推廣：只在每月第一個星期五推"
+    )
+    assert _legend_note("A", {"label": "恆常推廣", "remark": "舊快照沒有 hint"}) == (
+        "A 餐 · 恆常推廣：舊快照沒有 hint"
+    )
+    assert _legend_note("C", {"label": "", "hint": ""}) == "C 餐"
+
+
+def test_result_and_excel_say_what_abc_mean(client):
+    """The legend is where the numbers are read: result page, 參數, headers."""
+    from openpyxl import load_workbook
+
+    login(client, "adminpw", "Ricky")
+    # Self-contained: the legend test may run on its own, so make sure the month
+    # it computes has shares to read.
+    client.post(
+        "/admin/shares/import",
+        data={"period": "2026-11"},
+        files={"file": ("shares.xlsx", (SAMPLES / "sample_shares.xlsx").read_bytes())},
+        follow_redirects=False,
+    )
+    resp = client.post(
+        "/run/new",
+        data={"period": "2026-11", **PROMO},
+        files={
+            "target_file": ("t.xlsx", (SAMPLES / "sample_target.xlsx").read_bytes()),
+            "stock_file": ("s.xlsx", (SAMPLES / "sample_stock_wide.xlsx").read_bytes()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    page = client.get(f"/run/{token}").text
+    assert "餐別說明" in page
+    assert "A 餐 · 恆常推廣" in page
+    assert "每月恆常推出的推廣活動。" in page
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    legend = [row for row in book["參數"].iter_rows(values_only=True) if row[0] == "餐別"]
+    assert len(legend) == 3
+    assert legend[0][1].startswith("A 餐 · 恆常推廣：")
+    assert "每月恆常推出的推廣活動。" in legend[0][1]
+
+    # The comparison header stays short; the plan name rides on its hover note.
+    header = book["比較"]
+    assert header["O1"].value == "A 需求"
+    assert header["O1"].comment is not None
+    assert "恆常推廣" in header["O1"].comment.text

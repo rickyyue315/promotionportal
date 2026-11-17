@@ -71,6 +71,15 @@ DEFAULT_SCENARIO_SETTINGS: Dict[str, Dict[str, Any]] = {
     "C": {"label": "", "remark": "", "optional": 1},
 }
 
+# One line saying what each plan actually is. A remark typed in 餐別與規則 wins
+# over this; the gloss only exists so "A 餐" is never left unexplained — it is
+# what the result page and the Excel 參數 sheet print as the legend.
+SCENARIO_HINTS: Dict[str, str] = {
+    "A": "每月恆常推出的推廣活動。",
+    "B": "「精彩價」與 PIP 類的價格推廣。",
+    "C": "只在大節或特殊月份推出，非經常性；未設定佔比時整餐略過。",
+}
+
 DATA_DIR_SOURCES = ("DATA_DIR", "volume", "default")
 
 
@@ -339,11 +348,22 @@ def scenario_settings() -> Dict[str, Dict[str, Any]]:
 
 
 def scenario_labels() -> Dict[str, Dict[str, str]]:
-    """Just the display strings — what gets snapshotted into a run."""
-    return {
-        sc: {"label": meta["label"], "remark": meta["remark"]}
-        for sc, meta in scenario_settings().items()
-    }
+    """Just the display strings — what gets snapshotted into a run.
+
+    ``hint`` is the sentence the result page and the Excel legend print under
+    the plan name: the remark when one was written, otherwise the built-in
+    gloss. Snapshotted with the rest so renaming a plan later does not rewrite
+    the legend of a result that is already on screen.
+    """
+    out: Dict[str, Dict[str, str]] = {}
+    for sc, meta in scenario_settings().items():
+        remark = (meta["remark"] or "").strip()
+        out[sc] = {
+            "label": meta["label"],
+            "remark": remark,
+            "hint": remark or SCENARIO_HINTS.get(sc, ""),
+        }
+    return out
 
 
 def save_scenario_settings(items: Dict[str, Dict[str, Any]]) -> None:

@@ -48,6 +48,13 @@
     </form>
   </header>
 
+  {% set meta = labels.get(scenario) or {} %}
+  {% if meta.hint or meta.remark %}
+  <div class="body" style="padding-top:9px;padding-bottom:9px;background:var(--surface-2);border-bottom:1px solid var(--border)">
+    <span class="dim" style="font-size:12.5px">{{ meta.hint or meta.remark }}</span>
+  </div>
+  {% endif %}
+
   <div class="body flush">
     {% if sku and selected %}
       <div class="statbar">

@@ -252,6 +252,18 @@ tr.is-short:hover td { background: #fdf3f2; }
 .alert.warn { background: var(--warn-soft); border-color: #eeddb8; color: var(--warn); }
 .alert.error { background: var(--danger-soft); border-color: #efccc7; color: var(--danger); }
 
+/* ---------- legend: what A／B／C mean ---------- */
+.legend {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 8px 24px; font-size: 12.5px; line-height: 1.55;
+}
+.legend-title {
+  grid-column: 1 / -1; font-size: 11.5px; font-weight: 600;
+  color: var(--muted); letter-spacing: .02em;
+}
+.legend-item { display: flex; flex-wrap: wrap; align-items: baseline; gap: 4px 8px; }
+.legend-name { font-weight: 600; color: var(--text); white-space: nowrap; }
+
 /* ---------- kpi ---------- */
 .kpis { display: grid; grid-template-columns: repeat(auto-fit, minmax(165px, 1fr)); gap: 12px; margin-bottom: 18px; }
 .kpi {

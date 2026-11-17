@@ -61,6 +61,22 @@
 </section>
 {% endif %}
 
+<section class="card">
+  <div class="body">
+    <div class="legend">
+      <div class="legend-title">餐別說明</div>
+      {% for sc in scenarios %}
+      {% set meta = labels.get(sc) or {} %}
+      <div class="legend-item">
+        <span class="legend-name">{{ scname(sc, labels) }}</span>
+        <span class="dim">{{ meta.hint or meta.remark }}</span>
+        {% if not totals[sc].n_sku %}<span class="badge neutral">本期未計</span>{% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+</section>
+
 <div class="kpis">
   <div class="kpi">
     <div class="label">SKU 數</div>
