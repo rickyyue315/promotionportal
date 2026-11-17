@@ -955,6 +955,12 @@ _STO_FILL = PatternFill("solid", fgColor="FFFFC000")
 _SHORT_FILL = PatternFill("solid", fgColor="FFFFC7CE")
 _SHORT_FONT = Font(color="FF9C0006")
 
+# RP Type needs its own colour: ND is not a shortage (the goods may be there)
+# and not an action like PO/STO. It is a data issue someone has to follow up,
+# so purple sits deliberately outside the warehouse palette.
+_ND_FILL = PatternFill("solid", fgColor="FFE4DFEC")
+_ND_FONT = Font(bold=True, color="FF5B3F86")
+
 
 def _tinted(
     ws,
@@ -1159,6 +1165,153 @@ def _legend_note(sc: str, meta: Dict[str, str]) -> str:
     return f"{text}：{hint}" if hint else text
 
 
+def _nd_follow_rows(
+    results: Dict[str, Any], scenarios: Sequence[str], names: Dict[str, str]
+) -> List[dict]:
+    """Lines where RP Type says ND (or the gate blocks) but stock is needed.
+
+    Two situations land on the same follow-up list:
+
+    * a gated shop is refused by the RP rule, so its dispatch is 0;
+    * a shop outside the gate is marked ND but still receives stock.
+
+    Missing RP Type at a gated shop is included too: the blank cell is exactly
+    what someone has to fill in, and the gate treats it like ND.
+    """
+    rows: List[dict] = []
+    for sc in scenarios:
+        res = results.get(sc)
+        if not res:
+            continue
+        brand_of = {s.sku: s.brand for s in res.skus}
+        desc_of = {s.sku: s.description for s in res.skus}
+        for ln in res.lines:
+            if ln.need_qty <= 0:
+                continue
+            rp_type = str(ln.rp_type or "").strip().upper()
+            if rp_type != "ND" and not ln.blocked:
+                continue
+            rows.append(
+                {
+                    "scenario": sc,
+                    "shop": ln.shop_code,
+                    "shop_name": names.get(ln.shop_code, ""),
+                    "brand": brand_of.get(ln.sku, ""),
+                    "sku": ln.sku,
+                    "description": desc_of.get(ln.sku, ""),
+                    "rp_type": rp_type,
+                    "blocked": ln.blocked,
+                    "alloc": ln.alloc_qty,
+                    "stock": ln.stock_qty,
+                    "pending": ln.pending_qty,
+                    "gap": ln.gap_qty,
+                    "need": ln.need_qty,
+                    "dispatch": ln.dispatch_qty,
+                }
+            )
+    order = {sc: i for i, sc in enumerate(scenarios)}
+    rows.sort(key=lambda r: (order.get(r["scenario"], 0), r["shop"], r["sku"]))
+    return rows
+
+
+def _nd_follow_text(row: dict) -> str:
+    """What the buyer should do with one ND line."""
+    if row["blocked"]:
+        if row["rp_type"]:
+            return (
+                f"RP Type = {row['rp_type']}：確認可否改 RF；"
+                "如不可，另行安排派貨"
+            )
+        return "未提供 RP Type：請補回；如不可，另行安排派貨"
+    if row["dispatch"] <= 0:
+        return "ND 不受此店管制，但倉存不足未派；請跟進貨源及 RP Type"
+    return "ND 不受此店管制，已照派；請確認 RP Type 是否正確"
+
+
+def _write_nd_sheet(wb, rows: List[dict]) -> None:
+    """One action list for every ND line that needs stock.
+
+    The sheet is deliberately flat: one row per 餐別 × 店舖 × SKU, so the shop
+    can be filtered and each line has the quantity to chase. The note above the
+    table carries the shop count, because the same shop appears once per SKU.
+    """
+    ws = wb.create_sheet("ND 派貨")
+    heads = [
+        "餐別", "店舖", "店舖名稱", "Brand Code", "SKU", "貨品名稱",
+        "RP Type", "狀況", "分配數量", "現有庫存", "在途", "差距",
+        "需要派貨", "實際派貨", "跟進",
+    ]
+    # Layout before the first row: a write-only sheet freezes these settings
+    # with its first append.
+    for col, width in {
+        "A": 8, "B": 10, "C": 24, "D": 12, "E": 16, "F": 32,
+        "G": 10, "H": 20, "I": 11, "J": 11, "K": 10, "L": 10,
+        "M": 11, "N": 11, "O": 44,
+    }.items():
+        ws.column_dimensions[col].width = width
+    ws.freeze_panes = "C4"
+    ws.auto_filter.ref = f"A3:{get_column_letter(len(heads))}{3 + len(rows)}"
+    ws.row_dimensions[1].height = 22
+    ws.row_dimensions[3].height = 30
+
+    title = WriteOnlyCell(ws, value="ND 派貨店舖名單")
+    title.font = Font(bold=True, size=14)
+    ws.append([title])
+    shops = {r["shop"] for r in rows}
+    note = WriteOnlyCell(
+        ws,
+        value=(
+            f"RP Type = ND（或受管制店舖未提供 RP Type），但需要派貨的店舖；"
+            f"共 {len(shops)} 間店舖、{len(rows)} 行（餐別 × SKU）。"
+            "受 RP 管制的店舖不派，其他店舖照派；A／B／C 是替代方案，不可相加。"
+        ),
+    )
+    note.font = Font(color="FF666666")
+    ws.append([note])
+    _put_header(
+        ws,
+        heads,
+        {
+            0: "A／B／C 是同一份 Target 的三個替代方案，不可相加",
+            6: "ND 或未提供；受管制店舖不派，其他店舖照派",
+            12: "依需求應派的件數；受管制店舖實際派 0",
+            13: "0 = 被 RP 管制擋下；大於 0 = 不受管制，已照派",
+        },
+    )
+    for row in rows:
+        if row["blocked"]:
+            status = "不派（RP 管制）"
+        elif row["dispatch"] > 0:
+            status = "照派（不受管制）"
+        else:
+            status = "未派（倉存不足）"
+        values: List[Any] = [
+            row["scenario"],
+            row["shop"],
+            row["shop_name"],
+            row["brand"],
+            row["sku"],
+            row["description"],
+            row["rp_type"] or "未提供",
+            status,
+            row["alloc"],
+            row["stock"],
+            row["pending"],
+            row["gap"],
+            row["need"],
+            row["dispatch"],
+            _nd_follow_text(row),
+        ]
+        # The RP Type and the two quantities are the cells the buyer scans
+        # first; the same pale purple as the detail sheets keeps the workbook
+        # visually consistent.
+        values[6] = _tinted(ws, values[6], _ND_FILL, font=_ND_FONT)
+        values[7] = _tinted(ws, values[7], _ND_FILL)
+        values[12] = _tinted(ws, values[12], _ND_FILL, font=_ND_FONT)
+        values[13] = _tinted(ws, values[13], _ND_FILL)
+        ws.append(values)
+
+
 def export_run(
     run: dict,
     results: Dict[str, Any],
@@ -1171,6 +1324,7 @@ def export_run(
     labels = labels or {}
     gate = {str(s).strip().upper() for s in gate_shops if str(s).strip()}
     params = params or {}
+    nd_rows = _nd_follow_rows(results, scenarios, params.get("shop_names") or {})
     wb = Workbook(write_only=True)
     wb.properties.title = f"推廣派貨計算 {run.get('period', '')}"
 
@@ -1193,7 +1347,10 @@ def export_run(
     # The first column of each block carries the plan's name as a hover note:
     # "A 需求" alone does not tell a reader outside the portal what A is.
     fixed_cols = 17
-    notes = {4: _promo_note(params)}
+    notes = {
+        4: _promo_note(params),
+        15: "被 RP Type 擋下的件數；ND／未提供而需要派貨的店舖名單見「ND 派貨」工作表",
+    }
     for i, sc in enumerate(scenarios):
         if labels.get(sc):
             notes[fixed_cols + i * 4] = _legend_note(sc, labels.get(sc) or {})
@@ -1271,6 +1428,10 @@ def export_run(
         for idx in short_cols:
             if line[idx]:
                 cells[idx] = _tinted(ws, line[idx], _SHORT_FILL, font=_SHORT_FONT)
+        # "RP 不派" is the only column on this sheet that points at the new
+        # follow-up list, so it gets the same purple as the detail rows.
+        if line[15]:
+            cells[15] = _tinted(ws, line[15], _ND_FILL, font=_ND_FONT)
         ws.append(cells)
 
     # --- detail sheet per scenario ---
@@ -1289,7 +1450,16 @@ def export_run(
         ]
         # Before the header row, for the same reason as the comparison sheet.
         _detail_layout(ws2, 1 + len(res.lines), len(detail_heads))
-        _put_header(ws2, detail_heads, {1: _legend_note(sc, labels.get(sc) or {})})
+        _put_header(
+            ws2,
+            detail_heads,
+            {
+                1: _legend_note(sc, labels.get(sc) or {}),
+                25: "ND（或受管制店舖未提供 RP Type）而需要派貨會以淺紫標示；"
+                "受管制店舖不派，其他店舖照派；完整名單見「ND 派貨」工作表",
+                26: "受 RP 管制的行以淺紫標示；ND 店舖名單見「ND 派貨」工作表",
+            },
+        )
         moq_of = {s.sku: s.moq for s in res.skus}
         # Name and brand per SKU, not per comparison row: a shared target used
         # to collapse to one "A + B 等 3 個" row, which left the members' 貨品名稱
@@ -1301,6 +1471,8 @@ def export_run(
         # is the rounded need, 可派 STO (20), 開 PO（全期）(21), 缺貨 (22).
         _STO_COL, _PO_COL, _SHORT_COL = 19, 20, 21
         for ln in res.lines:
+            rp_type = str(ln.rp_type or "").strip().upper()
+            nd_follow = ln.need_qty > 0 and (rp_type == "ND" or ln.blocked)
             reason = ""
             if ln.blocked:
                 reason = (
@@ -1332,9 +1504,33 @@ def export_run(
                 round(ln.daily_rate, 2),
                 ln.expected_sales,
                 ln.surplus_qty,
-                ln.rp_type,
+                rp_type or ("未提供" if ln.blocked else ""),
                 reason,
             ]
+            # A blocked row is the whole line, not just the action column: the
+            # shop, SKU and need all matter when the RP Type is chased. A shop
+            # outside the gate is marked on the RP Type cell only, because its
+            # numbers are otherwise normal and it is still being dispatched.
+            if ln.blocked:
+                values = [_tinted(ws2, value, _ND_FILL) for value in values]
+                rp_cell = _commented(
+                    ws2,
+                    values[25].value,
+                    "RP Type 不是 RF：依規則不派；已列入「ND 派貨」工作表",
+                )
+                rp_cell.fill = _ND_FILL
+                rp_cell.font = _ND_FONT
+                values[25] = rp_cell
+                values[26] = _tinted(ws2, reason, _ND_FILL, font=_ND_FONT)
+            elif nd_follow:
+                rp_cell = _commented(
+                    ws2,
+                    values[25],
+                    "ND：此店不受 RP 管制，照常派貨；已列入「ND 派貨」工作表",
+                )
+                rp_cell.fill = _ND_FILL
+                rp_cell.font = _ND_FONT
+                values[25] = rp_cell
             # The three columns the warehouse acts on carry a colour, the same
             # way the sheets are marked up by hand: yellow = raise a PO, orange
             # = raise an STO from D001, pale red = the stock simply is not there.
@@ -1347,6 +1543,10 @@ def export_run(
                     ws2, ln.short_qty, _SHORT_FILL, font=_SHORT_FONT
                 )
             ws2.append(values)
+
+    # --- ND follow-up (only when some ND line actually needs stock) ---
+    if nd_rows:
+        _write_nd_sheet(wb, nd_rows)
 
     # --- transfer suggestions (only when the run asked for them) ---
     if params.get("suggest_transfer"):
@@ -1406,7 +1606,9 @@ def export_run(
         [
             "顏色",
             "黃 = 需要開 PO（Buyer 落單）；橙 = 需要開 STO（RP 由 D001 出貨）；"
-            "淺紅 = 缺貨（倉存不足，要跟進）",
+            "淺紅 = 缺貨（倉存不足，要跟進）；"
+            "淺紫 = RP Type = ND／受管制店舖未提供而需要派貨"
+            "（名單見「ND 派貨」）",
         ]
     )
     for note in params.get("shared_targets") or []:
@@ -1525,6 +1727,26 @@ def export_run(
     if gate:
         ws3.append(["RP Type 管制店舖", "、".join(sorted(gate))])
         ws3.append(["RP Type 規則", "只有 RP Type = RF 才派貨；ND 或未提供一律 0 件"])
+    if nd_rows:
+        parts = []
+        for sc in scenarios:
+            sc_rows = [r for r in nd_rows if r["scenario"] == sc]
+            if not sc_rows:
+                continue
+            blocked = sum(r["need"] for r in sc_rows if r["blocked"])
+            sent = sum(r["dispatch"] for r in sc_rows if not r["blocked"])
+            parts.append(
+                f"{sc}：{len({r['shop'] for r in sc_rows})} 間店舖，"
+                f"不派 {blocked:,} 件、實際派 {sent:,} 件"
+            )
+        ws3.append(
+            [
+                "ND 派貨",
+                "；".join(parts)
+                + "。只列需要派貨的 ND／受管制店舖；逐店名單見「ND 派貨」工作表"
+                "（A／B／C 不可相加）",
+            ]
+        )
     if params.get("vendor_supply_sources"):
         ws3.append(
             ["行貨 Supply Source", "、".join(params["vendor_supply_sources"])]

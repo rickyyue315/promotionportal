@@ -162,6 +162,8 @@ def test_full_flow(client):
 
     wb = load_workbook(io.BytesIO(xlsx.content), read_only=True)
     assert wb.sheetnames[:4] == ["比較", "明細_A", "明細_B", "明細_C"]
+    # No ND line needs stock in this run, so the follow-up sheet is absent.
+    assert "ND 派貨" not in wb.sheetnames
     ws = wb["比較"]
     header = [c for c in next(ws.iter_rows(values_only=True))]
     # Brand Code leads the sheet so the brand is read before the article number.
@@ -536,15 +538,18 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
     ws.append(["SKU", "貨品名稱", "Target Qty"])
     ws.append(["111058302001", "面膜", 100])
     ws.append(["111058302002", "精華", 100])
+    ws.append(["111058302003", "眼霜", 100])
     buf = io.BytesIO()
     wb.save(buf)
 
     stock = _sap_stock_bytes(
         [
-            ("111058302001", "面膜", "ND", 0, "HB87"),   # blocked
+            ("111058302001", "面膜", "ND", 0, "HB87"),   # blocked, RP says ND
             ("111058302001", "面膜", "RF", 0, "HA01"),
             ("111058302002", "精華", "RF", 0, "HB87"),   # allowed
-            ("111058302002", "精華", "RF", 0, "HA01"),
+            ("111058302002", "精華", "ND", 0, "HA01"),   # outside the gate: still sent
+            ("111058302003", "眼霜", "", 0, "HB87"),     # missing RP Type: blocked
+            ("111058302003", "眼霜", "RF", 0, "HA01"),
         ]
     )
 
@@ -584,6 +589,17 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
     # blocked_qty only, so the shortage total stays about the warehouse.
     assert nd_hb87.short_qty == 0
 
+    # A blank RP Type is blocked the same way as ND, and must stay visible as
+    # missing data rather than being silently treated as RF.
+    missing = next(
+        ln
+        for ln in run.results["A"].lines
+        if ln.sku == "111058302003" and ln.shop_code == "HB87"
+    )
+    assert missing.blocked is True
+    assert missing.rp_type == ""
+    assert missing.blocked_qty == 50
+
     # The SKU-level numbers exclude the blocked half, so 需求/可派 reconcile.
     sku_row = next(s for s in run.results["A"].skus if s.sku == "111058302001")
     assert sku_row.need_qty == 50
@@ -592,6 +608,93 @@ def test_hb87_blocks_nd_and_dispatches_rf(client):
 
     result = client.get(f"/run/{token}")
     assert "RP Type" in result.text
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    assert "ND 派貨" in book.sheetnames
+    ws = book["ND 派貨"]
+    assert ws["A1"].value == "ND 派貨店舖名單"
+    assert "2 間店舖" in ws["A2"].value
+    assert [c.value for c in ws[3]][:3] == ["餐別", "店舖", "店舖名稱"]
+
+    rows = list(ws.iter_rows(min_row=4, values_only=True))
+    # HB87 × (ND + missing RP Type), plus HA01 × ND outside the gate. The RF
+    # lines are not follow-ups and must stay out of this list.
+    assert len(rows) == 3
+    by_key = {(row[1], row[4]): row for row in rows}
+    assert ("HB87", "111058302002") not in by_key
+    assert ("HA01", "111058302001") not in by_key
+
+    blocked = by_key[("HB87", "111058302001")]
+    assert blocked[6] == "ND"
+    assert blocked[7] == "不派（RP 管制）"
+    assert blocked[12] == 50          # 需要派貨
+    assert blocked[13] == 0           # 實際派貨
+    assert "改 RF" in blocked[14]
+
+    missing_row = by_key[("HB87", "111058302003")]
+    assert missing_row[6] == "未提供"
+    assert missing_row[7] == "不派（RP 管制）"
+    assert "補回" in missing_row[14]
+
+    outside_gate = by_key[("HA01", "111058302002")]
+    assert outside_gate[6] == "ND"
+    assert outside_gate[7] == "照派（不受管制）"
+    assert outside_gate[12] == 50
+    assert outside_gate[13] == 50
+    assert "已照派" in outside_gate[14]
+
+    # The detail sheet marks the blocked rows in full and only the RP cell for
+    # an ND shop that is still being sent stock; the comparison sheet marks the
+    # blocked quantity that points at this new list.
+    detail = book["明細_A"]
+    dhead = [c.value for c in detail[1]]
+    d_shop = dhead.index("店舖") + 1
+    d_sku = dhead.index("SKU") + 1
+    d_rp = dhead.index("RP Type") + 1
+    d_reason = dhead.index("不派原因") + 1
+    d_rows = {
+        (detail.cell(row=r, column=d_shop).value,
+         detail.cell(row=r, column=d_sku).value): r
+        for r in range(2, detail.max_row + 1)
+    }
+    blocked_row = d_rows[("HB87", "111058302001")]
+    assert detail.cell(row=blocked_row, column=1).fill.fgColor.rgb == "FFE4DFEC"
+    assert detail.cell(row=blocked_row, column=d_rp).value == "ND"
+    assert detail.cell(row=blocked_row, column=d_rp).font.bold is True
+    assert detail.cell(row=blocked_row, column=d_reason).value.startswith("RP=ND")
+    outside_row = d_rows[("HA01", "111058302002")]
+    assert detail.cell(row=outside_row, column=d_rp).fill.fgColor.rgb == "FFE4DFEC"
+    assert detail.cell(row=outside_row, column=1).fill.fill_type is None
+    rf_row = d_rows[("HB87", "111058302002")]
+    assert detail.cell(row=rf_row, column=d_rp).fill.fill_type is None
+
+    compare = book["比較"]
+    chead = [c.value for c in compare[1]]
+    rp_col = chead.index("RP 不派") + 1
+    c_rows = {
+        compare.cell(row=r, column=2).value: r
+        for r in range(2, compare.max_row + 1)
+    }
+    assert compare.cell(row=c_rows["111058302001"], column=rp_col).value == 50
+    assert (
+        compare.cell(row=c_rows["111058302001"], column=rp_col).fill.fgColor.rgb
+        == "FFE4DFEC"
+    )
+    assert (
+        compare.cell(row=c_rows["111058302002"], column=rp_col).fill.fill_type
+        is None
+    )
+
+    params_sheet = {
+        row[0]: (row[1] if len(row) > 1 else "")
+        for row in book["參數"].iter_rows(values_only=True)
+        if row and row[0]
+    }
+    assert "A：2 間店舖" in str(params_sheet["ND 派貨"])
+    assert "不派 100 件、實際派 50 件" in str(params_sheet["ND 派貨"])
+    book.close()
 
 
 def test_moq_comes_from_the_stock_file_not_the_target(client):

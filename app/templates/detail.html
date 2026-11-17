@@ -107,7 +107,9 @@
               {% endif %}
               {% if gate %}
               <td>
-                {% if ln.rp_type %}
+                {% if ln.rp_type == 'ND' and ln.need_qty > 0 %}
+                  <span class="badge warn" title="{{ 'RP Type = ND，受 RP 管制，已列入待跟進名單' if ln.blocked else 'RP Type = ND，但此店不受 RP 管制，會照常派貨；已列入 ND 派貨跟進名單' }}">{{ ln.rp_type }}</span>
+                {% elif ln.rp_type %}
                   <span class="badge {{ 'ok' if ln.rp_type == 'RF' else 'neutral' }}">{{ ln.rp_type }}</span>
                 {% else %}<span class="dim">—</span>{% endif %}
               </td>
