@@ -824,7 +824,8 @@ def test_shared_target_flows_through_to_the_result(client):
     book = load_workbook(io.BytesIO(export.content))
     compare = [c.value for c in book["比較"][2]]
     assert compare[0] == "111058302001 + 111058302002"
-    assert compare[2] == 4000
+    # 推廣時期 (2) and 日數 (3) come before the quantities now.
+    assert compare[4] == 4000
     params = [row for row in book["參數"].iter_rows(values_only=True)]
     assert any(row[0] == "共用 Target" for row in params)
 
@@ -1145,6 +1146,72 @@ def test_export_colours_what_has_to_be_raised(client):
     assert compare.cell(row=2, column=cpo).fill.fgColor.rgb == "FFFFFF00"
     assert compare.freeze_panes == "C2"
     wb2.close()
+
+
+def test_export_states_the_promo_window_on_every_row(client):
+    """「推廣時期」「日數」ride on each row of the comparison sheet.
+
+    The sheet leaves the portal, and 派貨目標 is only a fraction of Target, so
+    the window it was scaled from has to be on the same line: 280 next to 700
+    looks like a mistake without it.
+    """
+    period = "2027-08"
+    sku = "111058306001"
+
+    db.upsert_shop("HC01", "HC01 門市", "HK")
+    db.save_shares(period, "A", {"HC01": 1.0}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 700])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["Article", "Site", "SaSa Net Stock"])
+    ws.append([sku, "HC01", 0])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": period,
+            "promo_start": "2027-08-02",
+            "promo_end": "2027-08-11",     # 10 days, the first 4 dispatched
+            "dispatch_days": "4",
+        },
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    ws = book["比較"]
+    head = [c.value for c in ws[1]]
+    assert head[2] == "推廣時期"
+    assert head[3] == "日數"
+
+    row = [c.value for c in ws[2]]
+    assert row[2] == "2027-08-02 → 2027-08-11"
+    assert row[3] == "10 日（派 4 日）"
+    assert row[4] == 700
+    assert row[5] == 280                  # 700 × 4/10
+
+    # The hover note says which of the two day counts scales the target.
+    assert ws["D1"].comment is not None
+    assert "4/10" in ws["D1"].comment.text
 
 
 def test_supply_source_column_missing_is_reported(client):
@@ -1483,6 +1550,6 @@ def test_result_and_excel_say_what_abc_mean(client):
 
     # The comparison header stays short; the plan name rides on its hover note.
     header = book["比較"]
-    assert header["O1"].value == "A 需求"
-    assert header["O1"].comment is not None
-    assert "恆常推廣" in header["O1"].comment.text
+    assert header["Q1"].value == "A 需求"
+    assert header["Q1"].comment is not None
+    assert "恆常推廣" in header["Q1"].comment.text

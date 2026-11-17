@@ -876,6 +876,49 @@ def _put_header(
     ws.append(cells)
 
 
+def _promo_cells(params: dict) -> Tuple[str, str]:
+    """「推廣時期」「日數」as two columns on the comparison sheet.
+
+    The sheet leaves the portal, and every quantity on it is scaled to the
+    dispatch window (派貨目標 = Target × 派貨日數／推廣日數). A Target of 1,500
+    sitting next to 600 reads as a mistake unless the dates and the day count
+    travel with it, so both ride on every row.
+    """
+    start = str(params.get("promo_start") or "").strip()
+    end = str(params.get("promo_end") or "").strip()
+    period = f"{start} → {end}" if start and end else start
+    try:
+        promo_days = int(params.get("promo_days") or 0)
+        dispatch_days = int(params.get("dispatch_days") or 0)
+    except (TypeError, ValueError):
+        return period, ""
+    if promo_days <= 0:
+        return period, ""
+    # The dispatch window is what 派貨目標 is scaled to, so it has to be on the
+    # row: "10 日" alone would contradict the 4-day numbers beside it.
+    if dispatch_days and dispatch_days != promo_days:
+        return period, f"{promo_days} 日（派 {dispatch_days} 日）"
+    return period, f"{promo_days} 日"
+
+
+def _promo_note(params: dict) -> str:
+    """The hover note on 「日數」, spelling out how the day count was applied."""
+    try:
+        promo_days = int(params.get("promo_days") or 0)
+        dispatch_days = int(params.get("dispatch_days") or 0)
+    except (TypeError, ValueError):
+        return ""
+    if promo_days <= 0:
+        return ""
+    if dispatch_days and dispatch_days != promo_days:
+        return (
+            f"推廣期共 {promo_days} 日，只派首 {dispatch_days} 日："
+            f"派貨目標 = Target × {dispatch_days}/{promo_days}；"
+            "行貨店舖例外，按全期 Target 開 PO（全期）"
+        )
+    return f"推廣期共 {promo_days} 日，整段推廣一次派貨：派貨目標 = Target"
+
+
 def _target_heads(params: dict) -> Tuple[str, str]:
     """Column names for the full-period target and the dispatch-window share.
 
@@ -921,7 +964,11 @@ def _compare_layout(ws, last_row: int, n_cols: int) -> None:
     ws.row_dimensions[1].height = 30
     ws.column_dimensions["A"].width = 13
     ws.column_dimensions["B"].width = 38
-    for idx in range(3, n_cols + 1):
+    # 推廣時期 holds two dates and 日數 the day count with the dispatch window
+    # in brackets; both are wider than a number, so they get their own widths.
+    ws.column_dimensions["C"].width = 23
+    ws.column_dimensions["D"].width = 17
+    for idx in range(5, n_cols + 1):
         ws.column_dimensions[get_column_letter(idx)].width = 9.5
 
 
@@ -954,8 +1001,10 @@ def export_run(
 
     # --- comparison sheet ---
     ws = wb.create_sheet("比較")
+    promo_period, promo_days = _promo_cells(params)
     headers = [
-        "SKU", "貨品名稱", "Target", "派貨目標", "店舖庫存", "在途",
+        "SKU", "貨品名稱", "推廣時期", "日數", "Target", "派貨目標",
+        "店舖庫存", "在途",
         "倉存", "倉存在途", "日銷", "預計銷量", "目標差距", "貨源缺口",
         "RP 不派", "夠貨",
     ]
@@ -965,12 +1014,11 @@ def export_run(
         headers += [f"{sc} 需求", f"{sc} 派貨", f"{sc} 開 PO（全期）", f"{sc} 缺貨"]
     # The first column of each block carries the plan's name as a hover note:
     # "A 需求" alone does not tell a reader outside the portal what A is.
-    fixed_cols = 14
-    notes = {
-        fixed_cols + i * 4: _legend_note(sc, labels.get(sc) or {})
-        for i, sc in enumerate(scenarios)
-        if (labels.get(sc) or {})
-    }
+    fixed_cols = 16
+    notes = {3: _promo_note(params)}
+    for i, sc in enumerate(scenarios):
+        if labels.get(sc):
+            notes[fixed_cols + i * 4] = _legend_note(sc, labels.get(sc) or {})
     # Layout has to be set before the first row is written: a write-only sheet
     # flushes its column widths and pane settings with the header row, so
     # anything set afterwards is silently dropped.
@@ -982,6 +1030,8 @@ def export_run(
         line: List[Any] = [
             row["sku"],
             row["description"],
+            promo_period,
+            promo_days,
             row["target_qty"],
             first.dispatch_target if first else 0,
             first.total_stock if first else row["total_stock"],
