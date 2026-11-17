@@ -1005,6 +1005,27 @@ def _promo_note(params: dict) -> str:
     return f"推廣期共 {promo_days} 日，整段推廣一次派貨：派貨目標 = Target"
 
 
+def _group_note(row: dict) -> str:
+    """What a split row is a part of, for the hover note on its SKU cell.
+
+    The target file writes one number for a block of packs; the sheet lists the
+    SKUs apart so they can be filtered and looked up. Without this note the
+    number the buyer typed is nowhere on the row.
+    """
+    if not row.get("group_size"):
+        return ""
+    others = [sku for sku in row.get("members") or [] if sku != row["sku"]]
+    lines = [
+        f"貨組（共 {row['group_size']} 個 SKU）："
+        + "、".join(row.get("members") or [row["sku"]]),
+        f"共用 Target {row.get('group_total', row['target_qty']):,} 件，"
+        f"本行 {row['target_qty']:,} 件是自動拆分後的一份"
+        + (f"（其餘：{'、'.join(others)}）" if others else ""),
+        "夠貨與缺口按整組判斷；缺口只寫在組內其中一行，避免重複計算。",
+    ]
+    return "\n".join(lines)
+
+
 def _target_heads(params: dict) -> Tuple[str, str]:
     """Column names for the full-period target and the dispatch-window share.
 
@@ -1120,6 +1141,12 @@ def export_run(
 
     for row in compare_rows:
         first = next(iter(row["scenarios"].values()), None)
+        # A shared target's gap is written on one row of the group (so sums do
+        # not count it twice). Leaving 0 on its siblings would read as "covered"
+        # next to a 不夠貨 badge, so those cells stay empty instead.
+        gap: Any = row["shortfall_qty"]
+        if row.get("group_size") and row.get("short") and not gap:
+            gap = ""
         line: List[Any] = [
             row.get("brand", ""),
             row["sku"],
@@ -1135,7 +1162,7 @@ def export_run(
             round(first.daily_rate, 2) if first else 0,
             first.expected_sales if first else 0,
             first.gap_target if first else 0,
-            row["shortfall_qty"],
+            gap,
             first.blocked_qty if first else 0,
             "是" if first and first.enough else "否",
         ]
@@ -1154,6 +1181,13 @@ def export_run(
                 s.short_qty if s else 0,
             ]
         cells = list(line)
+        group_note = _group_note(row)
+        if group_note:
+            # The rows are split apart, so the one number the buyer wrote would
+            # otherwise vanish. A hover note keeps the link without adding a
+            # column that would repeat on every member row.
+            cells[1] = WriteOnlyCell(ws, row["sku"])
+            cells[1].comment = Comment(group_note, "派貨計算")
         for idx in po_cols:
             if line[idx]:
                 cells[idx] = _tinted(ws, line[idx], _PO_FILL)
@@ -1163,7 +1197,6 @@ def export_run(
         ws.append(cells)
 
     # --- detail sheet per scenario ---
-    desc_of = {r["sku"]: r.get("description", "") for r in compare_rows}
     full_head, window_head = _target_heads(params)
     for sc in scenarios:
         res = results.get(sc)
@@ -1181,9 +1214,11 @@ def export_run(
         _detail_layout(ws2, 1 + len(res.lines))
         _put_header(ws2, detail_heads, {1: _legend_note(sc, labels.get(sc) or {})})
         moq_of = {s.sku: s.moq for s in res.skus}
-        # Brand per SKU, not per comparison row: a shared target collapses to one
-        # "A + B" row there, while the detail sheet still lists each SKU.
+        # Name and brand per SKU, not per comparison row: a shared target used
+        # to collapse to one "A + B 等 3 個" row, which left the members' 貨品名稱
+        # blank on this sheet. The summaries know every SKU by itself.
         brand_of = {s.sku: s.brand for s in res.skus}
+        desc_of = {s.sku: s.description for s in res.skus}
         names = params.get("shop_names") or {}
         # Positions of the three action columns in the row list below: 需求 (16)
         # is the rounded need, 可派 STO (17), 開 PO（全期）(18), 缺貨 (19).

@@ -201,7 +201,7 @@
     {% endfor %}
     <p class="dim" style="font-size:12.5px;margin:10px 0 0">
       同一貨組共用一個 Target：夠貨按整組存貨判斷，各店需求先以組的缺口封頂，再按上列比例拆回各 SKU。
-      比較表以一行顯示整組，明細頁仍可逐個 SKU 查看。
+      比較表與明細都逐個 SKU 一行，貨組關係見 SKU 旁邊的「貨組」標籤；Excel 的 SKU 儲存格有滑鼠註解寫明整組與拆法。
     </p>
   </div>
 </section>
@@ -246,11 +246,11 @@
         </thead>
         <tbody>
         {% for row in rows %}
-          {% set short = row.shortfall_qty > 0 %}
+          {% set short = row.short %}
           {% set s0 = (row.scenarios.values() | list | first) %}
           <tr class="{{ 'is-short' if short }}" data-short="{{ 1 if short else 0 }}"
               data-search="{{ (row.sku ~ ' ' ~ row.description ~ ' ' ~ row.brand) | lower }}">
-            <td class="mono">{{ row.sku }}{% if row.group_size %}<span class="badge neutral" style="margin-left:6px">貨組 {{ row.group_size }}</span>{% endif %}{% if row.brand %}<span style="display:block;font-size:11px;color:var(--muted)" title="Brand code（來自 Target 檔）">{{ row.brand }}</span>{% endif %}</td>
+            <td class="mono">{{ row.sku }}{% if row.group_size %}<span class="badge neutral" style="margin-left:6px" title="貨組 {{ row.group_size }} 個 SKU：{{ row.members | join('、') }}；共用 Target {{ row.group_total | num }}，本行是其中一份">貨組 {{ row.group_size }}</span>{% endif %}{% if row.brand %}<span style="display:block;font-size:11px;color:var(--muted)" title="Brand code（來自 Target 檔）">{{ row.brand }}</span>{% endif %}</td>
             <td class="dim">{{ row.description or '—' }}</td>
             <td class="num">{{ row.target_qty | num }}</td>
             <td class="num">{{ s0.dispatch_target | num if s0 else '—' }}</td>
@@ -294,7 +294,7 @@
     「目標差距」＝ Target − 推廣期預計銷量，正數代表按現時銷量做不到 Target。
     「夠貨」＝ 店舖庫存 ＋ 在途 ＋ 倉存 是否足以覆蓋整個 Target；「缺貨」是倉存應付不來的需求，已按需求比例分配到各店。
     {% if params.shared_targets %}
-    <br>「貨組」是共用同一個 Target 的 SKU：Target 與存貨以整組合計，所以 5,000 + 1,000 對 4,000 是夠貨。
+    <br>「貨組」是共用同一個 Target 的 SKU：Target 會按銷量比例拆回各 SKU（表上每行是它的一份，加起來就是貨組總數），夠貨仍按整組存貨判斷，所以 5,000 + 1,000 對 4,000 是夠貨。
     {% endif %}
     {% if gate %}
     <br>RP Type 規則：{{ gate | join('、') }} 只有 RP Type = RF 才派貨，ND 或未提供一律 0 件，因此實際派貨量會較低。

@@ -936,10 +936,24 @@ def test_shared_target_flows_through_to_the_result(client):
     export = client.get(f"/run/{token}/export.xlsx")
     assert export.status_code == 200
     book = load_workbook(io.BytesIO(export.content))
-    compare = [c.value for c in book["比較"][2]]
-    assert compare[1] == "111058302001 + 111058302002"
+    compare = book["比較"]
+    # One row per SKU: a joined "A + B 等 2 個" label cannot be filtered or
+    # looked up, and it hid which articles the shared target covered.
+    out = list(compare.iter_rows(min_row=2, values_only=True))
+    assert [r[1] for r in out] == ["111058302001", "111058302002"]
     # Brand Code leads, then 推廣時期 (3) and 日數 (4) before the quantities.
-    assert compare[5] == 4000
+    assert sum(r[5] for r in out) == 4000      # the shares add back to the group
+    assert "4,000" in compare["B2"].comment.text
+
+    # The members keep their own 貨名 on the detail sheet — they used to come
+    # out blank because the name was looked up by the joined group label.
+    detail_names = {
+        row[1]: row[2]
+        for row in book["明細_A"].iter_rows(min_row=2, values_only=True)
+    }
+    assert detail_names["111058302001"] == "HYDRA 7PC"
+    assert detail_names["111058302002"] == "HYDRA 14PC"
+
     params = [row for row in book["參數"].iter_rows(values_only=True)]
     assert any(row[0] == "共用 Target" for row in params)
 

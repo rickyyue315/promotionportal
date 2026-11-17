@@ -1184,80 +1184,83 @@ def compute_all_scenarios(
     return out
 
 
-_GROUP_SUM_FIELDS = (
-    "target_qty", "total_alloc", "total_stock", "total_dispatch", "surplus_qty",
-    "shortfall_qty", "n_shops_needing", "dispatch_target", "total_pending",
-    "warehouse_qty", "warehouse_pending", "expected_sales", "gap_target",
-    "need_qty", "short_qty", "blocked_qty", "gap_supply", "po_qty", "po_target",
-)
-
-
-def _merge_group(members: Sequence[SkuSummary]) -> SkuSummary:
-    """One summary for a shared target, so the table reads 4,000 — not 3,200.
-
-    The members' rows are what the dispatch needs; the buyer's question is about
-    the group. Adding the numbers back up is the only honest way to show both.
-    """
-    if len(members) == 1:
-        return members[0]
-    first = members[0]
-    values = {
-        name: sum(getattr(member, name) for member in members)
-        for name in _GROUP_SUM_FIELDS
-    }
-    label = " + ".join(member.sku for member in members[:2])
-    if len(members) > 2:
-        label += f" 等 {len(members)} 個"
-    return SkuSummary(
-        sku=label,
-        description=first.description,
-        moq=max(member.moq for member in members),
-        daily_rate=round(sum(member.daily_rate for member in members), 4),
-        coverage_status=first.coverage_status,
-        group=first.group,
-        # The packs of one product share a brand; the first member's label is
-        # the one the group row shows.
-        brand=first.brand,
-        **values,
-    )
-
-
 def compare_scenarios(results: Dict[str, ScenarioResult]) -> List[dict]:
-    """Rows for the A/B/C comparison table: one per target, groups included."""
+    """Rows for the A/B/C comparison table: one row per SKU.
+
+    A shared target is split into a target per SKU before the scenarios run, so
+    every SKU already carries its own share. Keeping them on one joined row
+    ("A + B 等 3 個") hid which articles were inside and made the sheet
+    impossible to filter or look up by SKU, so the rows stay apart and the group
+    rides along as a label: ``group``, ``group_size``, ``members`` and
+    ``group_total`` say what the row is a part of.
+
+    The coverage gap is written on one row per group (see
+    ``_apply_group_coverage``), so summing 缺口 over the table still counts it
+    once.
+    """
     names = sorted(results)
     if not names:
         return []
 
+    # Membership is a property of the targets and stock, so it is the same in
+    # every scenario; read it once instead of rebuilding it per plan.
+    base = results[names[0]]
+    members: Dict[str, List[str]] = {}
+    for summary in base.skus:
+        if summary.group:
+            members.setdefault(summary.group, []).append(summary.sku)
+    members = {key: skus for key, skus in members.items() if len(skus) > 1}
+
     rows: Dict[str, dict] = {}
     order: List[str] = []
-
     for name in names:
-        grouped: Dict[str, List[SkuSummary]] = {}
         for summary in results[name].skus:
-            key = summary.group or summary.sku
-            if key not in grouped:
-                grouped[key] = []
-                if key not in rows:
-                    order.append(key)
-            grouped[key].append(summary)
-
-        for key, members in grouped.items():
-            merged = _merge_group(members)
-            row = rows.get(key)
+            row = rows.get(summary.sku)
             if row is None:
-                row = {
-                    "sku": merged.sku,
-                    "description": merged.description,
-                    "brand": merged.brand,
-                    "target_qty": merged.target_qty,
-                    "total_stock": merged.total_stock,
-                    "shortfall_qty": merged.shortfall_qty,
-                    "group_size": len(members) if len(members) > 1 else 0,
+                order.append(summary.sku)
+                row = rows[summary.sku] = {
+                    "sku": summary.sku,
+                    "description": summary.description,
+                    "brand": summary.brand,
+                    "target_qty": summary.target_qty,
+                    "total_stock": summary.total_stock,
+                    "shortfall_qty": summary.shortfall_qty,
+                    "group": summary.group if summary.group in members else "",
+                    "group_size": len(members.get(summary.group, [])),
+                    "members": members.get(summary.group, []),
+                    # The verdict is the group's, and it is the same in every
+                    # scenario; the page filters on this rather than on 缺口,
+                    # which only one row of the group carries.
+                    "short": False,
                     "scenarios": {},
                 }
-                rows[key] = row
-            row["scenarios"][name] = merged
+            row["scenarios"][name] = summary
+            row["short"] = row["short"] or summary.coverage_status == COVERAGE_SHORT
 
-    out = [rows[key] for key in order]
-    out.sort(key=lambda r: (-r["shortfall_qty"], r["sku"]))
+    out = [rows[sku] for sku in order]
+
+    group_total: Dict[str, int] = {}
+    group_gap: Dict[str, int] = {}
+    for row in out:
+        if not row["group"]:
+            continue
+        key = row["group"]
+        group_total[key] = group_total.get(key, 0) + row["target_qty"]
+        group_gap[key] = max(group_gap.get(key, 0), row["shortfall_qty"])
+    for row in out:
+        key = row["group"]
+        row["group_total"] = group_total.get(key, row["target_qty"])
+        # A standalone SKU has no group: its own gap is what sorts it.
+        row["group_gap"] = group_gap.get(key, row["shortfall_qty"])
+
+    # Short products first, then biggest gap, with a group's members kept
+    # together and in SKU order.
+    out.sort(
+        key=lambda r: (
+            0 if r["short"] else 1,
+            -r["group_gap"],
+            r["group"] or r["sku"],
+            r["sku"],
+        )
+    )
     return out

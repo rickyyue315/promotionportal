@@ -661,18 +661,50 @@ class TestSharedTarget:
         assert sum(line.dispatch_qty for line in res.lines) == 0
         assert all(line.short_qty == 0 for line in res.lines)
 
-    def test_compare_shows_one_row_for_the_group(self):
+    def test_compare_splits_the_group_into_one_row_per_sku(self):
+        """The table lists the SKUs apart, so each can be filtered or looked up."""
         targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
         res = compute_scenario(
             "A", ["S1"], [1.0], targets, {self.A: {"S1": 3500}, self.B: {}}
         )
         rows = compare_scenarios({"A": res})
-        assert len(rows) == 1
-        row = rows[0]
-        assert row["group_size"] == 2
-        assert row["target_qty"] == 4000
-        assert row["total_stock"] == 3500
-        assert row["sku"] == f"{self.A} + {self.B}"
+        assert [r["sku"] for r in rows] == [self.A, self.B]
+        a, b = rows
+        assert a["group_size"] == b["group_size"] == 2
+        assert a["group"] == b["group"] == self.A
+        assert a["members"] == [self.A, self.B]
+        # The single number the buyer wrote is still accounted for: the shares
+        # add back up to 4,000 and to the 3,500 actually on hand.
+        assert a["group_total"] == b["group_total"] == 4000
+        assert a["target_qty"] + b["target_qty"] == 4000
+        assert a["total_stock"] + b["total_stock"] == 3500
+        # The group is short as a whole: every member says 不夠貨, but the gap
+        # is only written once so sums cannot count it twice.
+        assert a["short"] is True and b["short"] is True
+        assert sum(r["shortfall_qty"] for r in rows) == 500
+
+    def test_a_group_row_carries_its_own_description_and_brand(self):
+        targets = [
+            SkuTarget(self.A, 4000, description="7 片裝", group=self.A, brand="BR01"),
+            SkuTarget(self.B, 0, description="14 片裝", group=self.A, brand="BR01"),
+        ]
+        targets, _ = split_shared_targets(targets)
+        res = compute_scenario(
+            "A", ["S1"], [1.0], targets, {self.A: {"S1": 500}, self.B: {"S1": 500}}
+        )
+        rows = {r["sku"]: r for r in compare_scenarios({"A": res})}
+        assert rows[self.A]["description"] == "7 片裝"
+        assert rows[self.B]["description"] == "14 片裝"
+        assert rows[self.B]["brand"] == "BR01"
+
+    def test_standalone_skus_still_sort_by_their_own_gap(self):
+        # The sort key prefers the group's gap; a SKU without a group must fall
+        # back to its own, or the biggest shortage would stop coming first.
+        targets = [SkuTarget("A_SMALL", 100), SkuTarget("Z_BIG", 1000)]
+        res = compute_scenario("A", ["S1"], [1.0], targets, {})
+        rows = compare_scenarios({"A": res})
+        assert [r["sku"] for r in rows] == ["Z_BIG", "A_SMALL"]
+        assert all(r["short"] for r in rows)
 
     def test_members_keep_their_own_moq_when_the_group_is_capped(self):
         targets, _ = split_shared_targets(self.targets(), sales_by_sku=self.sales())
@@ -800,8 +832,8 @@ class TestSupplySource:
         assert res.skus[0].po_qty == 0
 
     def test_group_summary_carries_the_po_quantity(self):
-        # Two members of one group: P1 from the warehouse, P2 on a PO. The
-        # comparison row is the group, so its 開 PO figure is the group's.
+        # Two members of one group: P1 from the warehouse, P2 on a PO. They show
+        # as separate rows now, so the group's PO figure is their sum.
         targets = [
             SkuTarget("P1", 100, group="P1"),
             SkuTarget("P2", 100, group="P1"),
@@ -811,9 +843,9 @@ class TestSupplySource:
             {"P1": {"S1": 0}, "P2": {"S1": 0}},
             supply_by_sku={"P1": {"S1": "2"}, "P2": {"S1": "1"}},
         )
-        row = compare_scenarios({"A": res})[0]
-        assert row["scenarios"]["A"].po_qty == 100
-        assert row["scenarios"]["A"].total_dispatch == 200
+        rows = compare_scenarios({"A": res})
+        assert sum(r["scenarios"]["A"].po_qty for r in rows) == 100
+        assert sum(r["scenarios"]["A"].total_dispatch for r in rows) == 200
 
 
 class TestVendorFullPeriodTarget:
@@ -937,9 +969,9 @@ class TestVendorFullPeriodTarget:
             promo=self.PROMO,
             supply_by_sku={"P1": {"V1": "1"}, "P2": {"V1": "1"}},
         )
-        row = compare_scenarios({"A": res})[0]
-        assert row["scenarios"]["A"].po_target == 340
-        assert row["scenarios"]["A"].po_qty == 340
+        row = compare_scenarios({"A": res})
+        assert sum(r["scenarios"]["A"].po_target for r in row) == 340
+        assert sum(r["scenarios"]["A"].po_qty for r in row) == 340
 
 
 class TestSurplus:
