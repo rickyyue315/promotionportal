@@ -628,7 +628,7 @@ RP Type 由庫存檔提供，所以庫存檔必須是**長表**（每行一個 S
 | `Unrestr. Consignment` | 寄售存貨，一併當作該 Site 的存貨 |
 | `Pending Received` | 在途派貨量，扣減店舖需求 |
 | `RP Type` | HB87 派貨判斷 |
-| `Supply source` | 貨源：`1` 行貨（Buyer 開 PO）、`2`／`4` 倉貨（RP 開 STO）；`D001` 那行忽略 |
+| `Supply source` | 貨源：`1`／`4` 行貨（Buyer 開 PO；`4` 經 D001 過數仍屬行貨）、`2` 倉貨（RP 開 STO）；`D001` 那行忽略 |
 | `Last Month Sold Qty` | 日銷分子（上月） |
 | `MTD Sold Qty` | 日銷分子（本月至今） |
 | `Launch Date` | 新產品只用推出後日數做分母 |
@@ -693,7 +693,7 @@ python -m pytest tests/ -q
 日銷與 Launch Date、貨倉上限分配、
 貨組補底（只限貨組、補到 Safety 為止、MOQ 進位、D001 優先給正常需求、RP 照樣擋、可關）、
 建議調貨（預設關、只限同 OM、D001 不足派才建議、不按 MOQ 進位、行貨與空白 OM 不配對）、
-Supply Source 貨源分流（1 行貨開 PO 不佔倉存、4 與 2 一樣走 D001、行貨用全期 Target）、
+Supply Source 貨源分流（1／4 行貨開 PO 不佔倉存、4 經 D001 過數仍屬行貨、行貨用全期 Target）、
 `Unrestr. Consignment` 與 `SaSa Net Stock` 合併成店舖存貨、
 完整上載到匯出流程、角色權限、重複 SKU 攔截、
 SAP 欄位辨識、HB87 的 RP Type 規則、餐別名稱快照、版本號顯示。
