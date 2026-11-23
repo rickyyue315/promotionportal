@@ -38,6 +38,10 @@ html, body {
 a { color: var(--accent); text-decoration: none; }
 a:hover { text-decoration: underline; }
 
+/* The hidden attribute has to beat any author display rule (.badge, .choice…),
+   otherwise switching a component off in JS leaves it on screen. */
+[hidden] { display: none !important; }
+
 h1, h2, h3 { font-weight: 600; letter-spacing: -.01em; margin: 0; }
 h1 { font-size: 21px; }
 h2 { font-size: 16px; }
@@ -152,6 +156,28 @@ h3 { font-size: 14px; }
 .card > header .hint { font-size: 12px; color: var(--muted); font-weight: 400; }
 .card > .body { padding: 16px; }
 .card > .body.flush { padding: 0; border-bottom: 1px solid var(--border); }
+
+/* A card that folds away. The header looks like .card > header, but the native
+   triangle becomes a 展開／收起 word so the whole row reads as one control.
+   A folded card shows nothing of its body — optional extras stay out of the way
+   of the workflow they are attached to. */
+details.card > summary {
+  padding: 13px 16px;
+  display: flex; align-items: center; gap: 10px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+  cursor: pointer;
+  list-style: none;
+}
+details.card:not([open]) > summary { border-bottom: 0; }
+details.card > summary::-webkit-details-marker { display: none; }
+details.card > summary .title { font-size: 16px; font-weight: 600; }
+details.card > summary .hint {
+  margin-left: auto; font-size: 12px; color: var(--muted); font-weight: 400;
+}
+details.card > summary .chev { font-size: 12px; color: var(--muted); white-space: nowrap; }
+details.card > summary .chev::after { content: "展開 ▾"; }
+details.card[open] > summary .chev::after { content: "收起 ▴"; }
 
 /* ---------- buttons ---------- */
 .btn {

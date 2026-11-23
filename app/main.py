@@ -399,10 +399,14 @@ async def shares_save(request: Request):
     if not period:
         return back("/admin/shares", BAD_PERIOD, "error")
     scenario = str(form.get("scenario", "A"))
-    unit = str(form.get("unit", "pct"))
+    # Two ways to say the same mix: percentages, or the money behind them. The
+    # database only ever stores percentages (see save_shares), so a month never
+    # ends up with one plan in dollars and another in percent.
+    unit = str(form.get("unit", "pct")).strip().lower()
+    unit = "amt" if unit in ("amt", "amount", "$", "money") else "pct"
     user = (auth.current_user(request) or {}).get("name", "")
 
-    pct: Dict[str, float] = {}
+    typed: Dict[str, float] = {}
     for key, value in form.items():
         if not key.startswith("pct_"):
             continue
@@ -410,18 +414,30 @@ async def shares_save(request: Request):
         number = excel_io.to_number(value)
         if number is None:
             continue
-        if unit == "pct":
-            number = number / 100.0
-        elif abs(number) > 1.5:
-            number = number / 100.0
-        pct[code] = max(number, 0.0)
+        typed[code] = max(number, 0.0)
 
-    db.save_shares(period, scenario, pct, user)
+    amount_total = 0.0
+    if unit == "amt":
+        pct, amount_total, _warnings = calc.weights_to_shares(typed)
+        if not pct:
+            return back(
+                f"/admin/shares?period={period}&scenario={scenario}",
+                "以金額輸入，但所有店舖的總額是 0，無法換算成佔比",
+                "error",
+            )
+        note_text = f"以金額輸入，總額 ${amount_total:,.0f}，儲存時已換算成百分比"
+    else:
+        pct = {code: value / 100.0 for code, value in typed.items()}
+        note_text = ""
+
+    db.save_shares(period, scenario, pct, user, note_text)
     total = sum(pct.values())
     level = "ok" if abs(total - 1) < 0.005 else "warn"
     label = db.scenario_settings()[scenario]["label"]
     who = f"{scenario} 餐 · {label}" if label else f"{scenario} 餐"
     note = f"{who} 已儲存，總和 {total:.2%}"
+    if unit == "amt":
+        note += f"（輸入總額 ${amount_total:,.0f}，已按比例換算）"
     return back(f"/admin/shares?period={period}&scenario={scenario}", note, level)
 
 
@@ -569,6 +585,10 @@ async def run_create(
     date_source: str = Form("auto"),
     group_topup: str = Form(""),
     suggest_transfer: str = Form(""),
+    temp_on: str = Form(""),
+    temp_name: str = Form(""),
+    temp_unit: str = Form("pct"),
+    temp_rows: str = Form(""),
     target_file: UploadFile = File(...),
     stock_file: UploadFile = File(...),
 ):
@@ -590,6 +610,24 @@ async def run_create(
 
     parsed_t = excel_io.parse_target_file(target_data)
     parsed_s = excel_io.parse_stock_file(stock_data, set(db.active_shop_codes()))
+
+    # 臨時餐：a one-off mix for this run only. It is deliberately never written
+    # to share_set — the monthly A/B/C grid is what the next run and the share
+    # template read, so a special promotion must not overwrite it. The scenario
+    # travels as "T" and lives only as long as this result does.
+    temp_label = ""
+    temp_shares: Dict[str, float] = {}
+    temp_total = 0.0
+    temp_notes: List[str] = []
+    temp_errors: List[str] = []
+    temp_unit = str(temp_unit).strip().lower()
+    temp_unit = "amt" if temp_unit in ("amt", "amount", "$", "money") else "pct"
+    temp_wanted = str(temp_on).strip().lower() not in ("", "0", "false", "off", "no")
+    if temp_wanted:
+        temp_label = (temp_name or "").strip()[:20] or "臨時餐"
+        temp_shares, temp_total, temp_notes, temp_errors = excel_io.parse_share_text(
+            temp_rows, unit=temp_unit
+        )
 
     # The target sheet already prints the promo window on its lines, so by
     # default that is the window we use: the dates on screen are then the same
@@ -621,6 +659,10 @@ async def run_create(
         problems.append("SKU Target：" + "；".join(parsed_t.errors))
     if parsed_s.errors:
         problems.append("店舖庫存：" + "；".join(parsed_s.errors))
+    if temp_errors:
+        problems.append("臨時餐：" + "；".join(temp_errors[:3]))
+    elif temp_wanted and not temp_shares:
+        problems.append("臨時餐：所有店舖的數值都是 0，無法換算成佔比")
     if problems:
         return back("/run/new", "上載檔案或日期有問題 — " + " ｜ ".join(problems), "error")
 
@@ -717,6 +759,12 @@ async def run_create(
     target_only = sorted(target_skus - set(stock_by_sku))
 
     shares = {sc: db.get_shares(period, sc) for sc in ready}
+    # 臨時餐 rides after A/B/C: same targets, same stock, different shop mix.
+    # It is part of this run only — nothing is written back to the database.
+    run_scenarios = list(ready)
+    if temp_wanted and temp_shares:
+        shares["T"] = temp_shares
+        run_scenarios.append("T")
     shops = db.active_shop_codes()
     # Names are a label on the code, not part of the arithmetic, but the export
     # is read by people who know "HB01" far less well than its shop name.
@@ -844,6 +892,27 @@ async def run_create(
         for res in results.values():
             res.warnings.extend(stock_notes)
 
+    if "T" in results:
+        # Said on the result itself, because a fourth column that is nowhere in
+        # the database is exactly the kind of thing someone re-opens later and
+        # cannot find again.
+        note = [
+            f"臨時餐「{temp_label}」只用於今次計算，沒有存入資料庫；"
+            "A／B／C 的每月佔比不受影響"
+        ]
+        if temp_unit == "amt":
+            note.append(
+                f"臨時餐以金額輸入，總額 ${temp_total:,.0f}，已按比例換算成佔比"
+            )
+        note.extend(temp_notes)
+        unknown = sorted(set(temp_shares) - shop_set)
+        if unknown:
+            note.append(
+                f"臨時餐有 {len(unknown)} 個店舖代碼不在店舖主檔，已忽略"
+                f"（例：{unknown[0]}）"
+            )
+        results["T"].warnings[:0] = note
+
     # Nothing about the files or the numbers goes to disk. The finished result
     # is handed to runstore (memory, a couple of hours) so the result page,
     # the drill-downs and the export work; the database only learns that a
@@ -859,9 +928,9 @@ async def run_create(
         }
     )
     params = {
-        "scenarios": ready,
-        "share_totals": {sc: sum(shares[sc].values()) for sc in ready},
-        "warnings": {sc: results[sc].warnings for sc in ready},
+        "scenarios": run_scenarios,
+        "share_totals": {sc: sum(shares[sc].values()) for sc in run_scenarios},
+        "warnings": {sc: results[sc].warnings for sc in run_scenarios},
         "n_shops": len(shops),
         "target_file": target_file.filename or "",
         "stock_file": stock_file.filename or "",
@@ -899,7 +968,18 @@ async def run_create(
         "shared_targets": shared_targets,
         # Snapshot the names so the page keeps the wording it was computed
         # with, even if the labels are renamed while it is still open.
-        "scenario_labels": db.scenario_labels(),
+        "scenario_labels": {
+            **db.scenario_labels(),
+            **(
+                {"T": {"label": temp_label, "remark": "臨時餐，只用於今次計算"}}
+                if "T" in results
+                else {}
+            ),
+        },
+        # The temp mix's own numbers, so the result page can print what was
+        # typed without keeping a copy of the input file.
+        "temp_label": temp_label if "T" in results else "",
+        "temp_amount": temp_total if ("T" in results and temp_unit == "amt") else 0.0,
         "rp_gate_shops": gate,
         # Same idea as the labels: the shop name is what the sheet is computed
         # with, so a rename while the result is still open does not rewrite it.
@@ -920,10 +1000,12 @@ def run_result(request: Request, run_id: str):
 
     results = run.results
     compare_rows = calc.compare_scenarios(results)
-    # Every scenario gets an entry, so templates can iterate A/B/C safely even
-    # when a month only has one plan configured.
-    totals = {sc: _totals(results.get(sc)) for sc in db.SCENARIOS}
     params = run.params
+    # The run remembers which meals it was computed with (A/B/C, plus the
+    # temp one when it was used), so the page never invents a column that has
+    # no result behind it.
+    run_scenarios = [sc for sc in params.get("scenarios", db.SCENARIOS) if sc in results]
+    totals = {sc: _totals(results.get(sc)) for sc in run_scenarios}
 
     # Cheapest scenario by dispatch volume. Shortfall is identical across
     # scenarios by construction (same target, same stock), so ranking by it
@@ -946,6 +1028,7 @@ def run_result(request: Request, run_id: str):
         results=results,
         rows=compare_rows,
         totals=totals,
+        scenarios=run_scenarios,
         warnings=params.get("warnings", {}),
         share_totals=params.get("share_totals", {}),
         params=params,
@@ -975,10 +1058,13 @@ def run_detail(
     if not run:
         return back("/runs", _expired(), "warn")
 
-    scenario = scenario if scenario in db.SCENARIOS else "A"
+    # The scenario list comes from the run, not from the database: the temp meal
+    # only exists here, and a month may carry two or three regular ones.
+    run_scenarios = [sc for sc in run.params.get("scenarios", db.SCENARIOS) if sc in run.results]
+    scenario = scenario if scenario in run_scenarios else (run_scenarios[0] if run_scenarios else "A")
     res = run.results.get(scenario)
     skus = _sorted_skus(res)
-    available = [sc for sc in db.SCENARIOS if run.results.get(sc) and run.results[sc].skus]
+    available = [sc for sc in run_scenarios if run.results.get(sc) and run.results[sc].skus]
     all_lines = res.lines if res else []
 
     if sku:
@@ -1007,6 +1093,7 @@ def run_detail(
         sku=sku,
         only_need=only_need,
         available_scenarios=available,
+        scenarios=run_scenarios,
         labels=_run_labels(run.params),
         gate=_run_gate(run.params),
         supply=_run_supply(run.params),

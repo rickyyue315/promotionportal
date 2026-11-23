@@ -2138,3 +2138,140 @@ def test_transfer_suggestion_is_opt_in_and_stays_inside_one_om(client):
     assert transfer_rows[0][:4] == ("餐別", "SKU", "貨品名稱", "OM")
     assert transfer_rows[1] == ("A", sku, "面膜", "OM 1", "HA12", "HA12 盈餘店", "HA11", "HA11 缺貨店", 25)
     assert transfer_rows[2][0] == "A" and transfer_rows[2][8] == 25
+
+
+def test_shares_can_be_saved_as_money_and_are_stored_as_percent(client):
+    """The grid accepts $$ and converts it; the database only ever sees %.
+
+    Storing the raw amounts would make one month's plan incomparable with the
+    next, and the readiness check (total ≈ 100%) would never pass again.
+    """
+    login(client, "adminpw", "Ricky")
+
+    resp = client.post(
+        "/admin/shares",
+        data={
+            "period": "2027-03",
+            "scenario": "B",
+            "unit": "amt",
+            "pct_HB01": "3000",
+            "pct_HB02": "1000",
+            "pct_HB03": "0",
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "level=ok" in resp.headers["location"], resp.headers["location"]
+
+    shares = db.get_shares("2027-03", "B")
+    assert shares == {"HB01": pytest.approx(0.75), "HB02": pytest.approx(0.25)}
+    assert db.share_status("2027-03")["B"]["ready"] is True
+
+    note = db.get_share_set("2027-03", "B")["note"]
+    assert "總額" in note and "4,000" in note
+
+
+def test_shares_with_zero_money_are_refused(client):
+    """No total means no ratio: refuse instead of saving a grid of zeros."""
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/admin/shares",
+        data={"period": "2027-03", "scenario": "C", "unit": "amt", "pct_HB01": "0"},
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303
+    assert "level=error" in resp.headers["location"], resp.headers["location"]
+    assert db.get_shares("2027-03", "C") == {}
+
+
+def test_temp_meal_is_a_fourth_meal_that_is_never_stored(client):
+    """A one-off mix must show up in the result and the export, not on disk."""
+    login(client, "adminpw", "Ricky")
+
+    shops = [s["code"] for s in db.list_shops(active_only=True)]
+    # Ascending weights, so the mix cannot coincide with the sample A/B/C split.
+    pasted = "\n".join(
+        f"{code}\t{(i + 1) * 1000}" for i, code in enumerate(shops)
+    )
+
+    target = SAMPLES / "sample_target.xlsx"
+    stock = SAMPLES / "sample_stock_wide.xlsx"
+    resp = client.post(
+        "/run/new",
+        data={
+            "period": "2026-11",
+            **PROMO,
+            "temp_on": "1",
+            "temp_name": "聖誕特別場",
+            "temp_unit": "amt",
+            "temp_rows": pasted,
+        },
+        files={
+            "target_file": (target.name, target.read_bytes()),
+            "stock_file": (stock.name, stock.read_bytes()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    assert run is not None
+    assert run.params["scenarios"] == ["A", "B", "C", "T"]
+    assert set(run.results) == {"A", "B", "C", "T"}
+
+    # The temp mix allocates the whole target too, just across a different set
+    # of shops: it is another meal, not a patch on A/B/C.
+    for summary in run.results["T"].skus:
+        assert summary.total_alloc == summary.target_qty
+    assert run.params["share_totals"]["T"] == pytest.approx(1.0)
+    assert run.params["temp_label"] == "聖誕特別場"
+    assert run.params["temp_amount"] == pytest.approx(sum((i + 1) * 1000 for i in range(len(shops))))
+
+    # It says out loud that it is not saved.
+    assert any("沒有存入資料庫" in w for w in run.results["T"].warnings)
+
+    # Nothing was written to the month: no T scenario, A/B/C untouched.
+    assert db.get_shares("2026-11", "T") == {}
+    assert set(db.share_status("2026-11")) == set(db.SCENARIOS)
+
+    # The mix really is different: a shop the monthly grid leaves at 0% now
+    # takes a share, so the two allocations cannot be identical.
+    sku = run.results["T"].skus[0].sku
+    alloc_a = {ln.shop_code: ln.alloc_qty for ln in run.results["A"].lines if ln.sku == sku}
+    alloc_t = {ln.shop_code: ln.alloc_qty for ln in run.results["T"].lines if ln.sku == sku}
+    assert alloc_a != alloc_t
+
+    # --- the page and the workbook both carry the fourth column ---
+    page = client.get(f"/run/{token}")
+    assert page.status_code == 200
+    assert "A／B／C／T 比較" in page.text
+    assert "聖誕特別場" in page.text
+
+    detail = client.get(f"/run/{token}/detail?scenario=T")
+    assert detail.status_code == 200
+    assert "臨時餐" in detail.text
+
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(client.get(f"/run/{token}/export.xlsx").content))
+    assert "明細_T" in book.sheetnames
+    header = list(book["比較"].iter_rows(max_row=1, values_only=True))[0]
+    assert "T 派貨" in header
+    assert "T 開 PO（全期）" in header
+
+    n_shops = len(db.active_shop_codes())
+    assert len(list(book["明細_T"].iter_rows(values_only=True))) == 1 + 10 * n_shops
+
+    # 參數 must carry the caveat: the workbook outlives the result, and the next
+    # run will not have a T.
+    param_rows = [r for r in book["參數"].iter_rows(values_only=True) if r and r[0]]
+    assert any(
+        key == "餐別" and str(value).startswith("T 餐 · 聖誕特別場")
+        for key, value in param_rows
+    )
+    assert any(
+        key == "臨時餐" and "沒有存入資料庫" in str(value)
+        for key, value in param_rows
+    )
+

@@ -21,9 +21,13 @@ from openpyxl.comments import Comment
 from openpyxl.styles import Alignment, Font, PatternFill
 from openpyxl.utils import get_column_letter
 
-from .calc import supply_code
+from .calc import supply_code, weights_to_shares
 
 SHOP_RE = re.compile(r"^[A-Z]{1,4}\d{1,4}[A-Z0-9]{0,2}$")
+# Looser than SHOP_RE on purpose: a pasted code is matched against the shop
+# master afterwards, so this only has to reject "a number in the wrong column"
+# without refusing a code that carries a dash or an underscore.
+PASTE_CODE_RE = re.compile(r"^[A-Z0-9][A-Z0-9._#\-/]{1,15}$")
 
 SKU_KEYS = ("sku", "article", "item", "product code", "貨號", "產品編號", "貨品編號", "編號")
 TARGET_KEYS = ("target qty", "target", "qty", "quantity", "數量", "目標", "目標數量")
@@ -890,6 +894,11 @@ def parse_share_file(data: bytes) -> ParsedShares:
         }
     )
 
+    # Collected first, converted per column afterwards: a column is either a
+    # percentage or money, and that can only be judged by looking at the whole
+    # column — one shop's $12,000 is not a 12,000% share.
+    raw_by_scenario: Dict[str, Dict[str, float]] = {k: {} for k in scenario_cols}
+
     for offset, row in enumerate(body, start=h + 2):
         if not any(c not in (None, "") for c in row):
             continue
@@ -915,16 +924,36 @@ def parse_share_file(data: bytes) -> ParsedShares:
 
         for scenario, col in scenario_cols.items():
             raw_val = row[col] if col < len(row) else None
-            pct = to_number(raw_val)
-            if pct is None:
+            value = to_number(raw_val)
+            if value is None:
                 continue
-            # Accept both 0.125 and 12.5 (meaning 12.5%)
-            if abs(pct) > 1.5:
-                pct = pct / 100.0
-            if pct < 0:
+            if value < 0:
                 out.warnings.append(f"第 {offset} 行（{shop} {scenario}）：負數已設為 0")
-                pct = 0.0
-            by_scenario[scenario][shop] = pct
+                value = 0.0
+            raw_by_scenario[scenario][shop] = value
+
+    for scenario, raw in raw_by_scenario.items():
+        if not raw:
+            continue
+        # A percentage cannot exceed 100, so anything above it means the column
+        # was written in dollars; convert the whole column by its total and say
+        # so, rather than turning $12,000 into 12,000%.
+        if max(raw.values()) > 100.5:
+            shares, total, warnings = weights_to_shares(raw)
+            out.warnings.extend(f"{scenario} 欄：{w}" for w in warnings)
+            if shares:
+                out.warnings.append(
+                    f"{scenario} 欄看似金額（總額 {total:,.0f}），"
+                    f"已按比例換算成百分比後寫入"
+                )
+            by_scenario[scenario] = shares
+            continue
+        # Accept both 0.125 and 12.5 (meaning 12.5%)
+        by_scenario[scenario] = {
+            shop: (value / 100.0 if abs(value) > 1.5 else value)
+            for shop, value in raw.items()
+            if value > 0
+        }
 
     out.by_scenario = by_scenario
     for scenario, pct in by_scenario.items():
@@ -937,6 +966,77 @@ def parse_share_file(data: bytes) -> ParsedShares:
             )
 
     return out
+
+
+def parse_share_text(
+    text: str, unit: str = "pct"
+) -> Tuple[Dict[str, float], float, List[str], List[str]]:
+    """Read a pasted two-column list (shop, value) into ``{shop: share}``.
+
+    Ops already keep the split in Excel, so a one-off mix should not need a file
+    upload: copying two columns and pasting them here is the whole workflow.
+    Tab, comma (half or full width), semicolon and spaces all separate the pair,
+    and a ``$`` or a ``%`` on the number is accepted.
+
+    ``unit="amt"`` treats the values as money and converts them by their total;
+    ``unit="pct"`` keeps them as percentages (12.5 and 0.125 both mean 12.5%,
+    same rule as the Excel import). Returns ``(shares, raw_total, warnings,
+    errors)`` — the raw total is only for printing the amount back to the user.
+    """
+    raw: Dict[str, float] = {}
+    warnings: List[str] = []
+    errors: List[str] = []
+    skipped = 0
+
+    for lineno, line in enumerate(text.splitlines(), start=1):
+        body = line.strip()
+        if not body or body.startswith("#"):
+            continue
+        # Split once, on the first run of separators, so a thousand separator
+        # inside the number ("HB01, $1,200") is not mistaken for a third field.
+        parts = re.split(r"[\t,，;；\s]+", body, maxsplit=1)
+        if len(parts) < 2 or not parts[1].strip():
+            errors.append(f"第 {lineno} 行「{body}」只有一個欄位，請用「店舖 數值」")
+            continue
+        code = parts[0].strip().upper()
+        number = to_number(parts[1].replace("$", "").replace("HK", ""))
+        if number is None:
+            # A copied header ("店舖 / 金額") is not a mistake worth blocking the
+            # run over — only a row that looks like data but is not a number is.
+            if not PASTE_CODE_RE.match(code):
+                skipped += 1
+                continue
+            errors.append(f"第 {lineno} 行「{parts[1]}」不是數字")
+            continue
+        if not PASTE_CODE_RE.match(code):
+            errors.append(f"第 {lineno} 行「{parts[0]}」不像店舖代碼")
+            continue
+        if number < 0:
+            warnings.append(f"{code}：負數已設為 0")
+            number = 0.0
+        if code in raw and raw[code] != number:
+            warnings.append(f"{code} 出現多於一次，已採用最後一行")
+        raw[code] = number
+
+    if skipped:
+        warnings.append(f"已略過 {skipped} 行非店舖資料（例如從 Excel 一併複製的標題行）")
+
+    if not raw:
+        if not errors:
+            errors.append("沒有讀到任何店舖與數值")
+        return {}, 0.0, warnings, errors
+
+    if unit == "amt":
+        shares, total, warns = weights_to_shares(raw)
+        warnings.extend(warns)
+        return shares, total, warnings, errors
+
+    shares = {
+        code: (value / 100.0 if abs(value) > 1.5 else value)
+        for code, value in raw.items()
+        if value > 0
+    }
+    return shares, sum(raw.values()), warnings, errors
 
 
 # ---------------------------------------------------------------------------
@@ -1598,6 +1698,19 @@ def export_run(
     # the portal.
     for sc in scenarios:
         ws3.append(["餐別", _legend_note(sc, labels.get(sc) or {})])
+    # The workbook outlives the 30-minute result, so it has to say that T is not
+    # part of the monthly setup — otherwise the next run looks like it lost a
+    # plan somebody remembers using.
+    if params.get("temp_label"):
+        temp_note = (
+            f"「{params['temp_label']}」只用於今次計算，沒有存入資料庫；"
+            "該月 A／B／C 佔比不受影響，下一個計算亦不會出現"
+        )
+        if params.get("temp_amount"):
+            temp_note += (
+                f"。以金額輸入，總額 ${params['temp_amount']:,.0f}，已按比例換算成佔比"
+            )
+        ws3.append(["臨時餐", temp_note])
     ws3.append(["計算時間", run.get("created_at", "")])
     ws3.append(["執行者", run.get("created_by", "")])
     ws3.append(["SKU 數", run.get("n_sku", "")])
@@ -1827,6 +1940,10 @@ def export_share_template(
     note.append(["Site 是店舖代碼，不可留空；不存在的代碼會自動建立店舖。"])
     note.append(["A / B / C 三欄相加各自要等於 100%。"])
     note.append(["可以填 0.125 或 12.5，系統都會當作 12.5%。"])
+    note.append(
+        ["也可以整欄改填金額（例如生意額 $$），系統會按該欄總額換算成百分比；"
+         "同一欄不要一半填 % 一半填金額。"]
+    )
     note.append(["留空的店舖視為 0%。"])
     note.append(["上載後系統會即時顯示每餐的總和，未達 100% 會警告。"])
     return _save(wb)

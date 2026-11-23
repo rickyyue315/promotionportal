@@ -2,10 +2,22 @@
 {% block title %}每月店舖佔比{% endblock %}
 {% block content %}
 
+<style>
+  /* The converted-percentage column only means something when the input is
+     money, so it stays out of the way in % mode. */
+  .conv-col { display: none; }
+  table.amt .conv-col { display: table-cell; }
+  .unit-pick { display: inline-flex; align-items: center; gap: 10px;
+               padding: 4px 10px; border: 1px solid var(--border); border-radius: 8px; }
+  .unit-pick label { display: inline-flex; align-items: center; gap: 4px;
+                     font-size: 12.5px; cursor: pointer; }
+</style>
+
 <div class="page-head">
   <div>
     <h1>每月店舖佔比</h1>
-    <div class="desc">每個月為 A／B／C 三個版本各自設定每間店舖的生意佔比，各版本分別要加起來等於 100%。</div>
+    <div class="desc">每個月為 A／B／C 三個版本各自設定每間店舖的生意佔比，各版本分別要加起來等於 100%。
+      可以用百分比填寫，也可以直接填金額（$$），系統會按總額換算成百分比。</div>
   </div>
   <div class="actions">
     <form method="get" action="/admin/shares" class="period-pick">
@@ -63,25 +75,29 @@
     <h2>{{ period }} ／ {{ scname(scenario, labels) }}</h2>
     <div class="split" style="gap:14px">
       <span class="pill-total {{ 'ok' if ((total - 1)|abs) < 0.005 else 'warn' }}" id="totalPill">
-        總和 <span id="totalVal">{{ '%.2f' % (total * 100) }}</span>%
+        <span id="totalLabel">總和 </span><span id="totalVal">{{ '%.2f' % (total * 100) }}</span><span id="totalUnit">%</span>
       </span>
-      <button class="btn sm" type="button" onclick="copyFrom('A')">複製 A 餐</button>
-      <button class="btn sm" type="button" onclick="normalise()">自動調整至 100%</button>
+      <span class="unit-pick" role="group" aria-label="輸入單位">
+        <label><input type="radio" name="unit" value="pct" form="shareForm" checked> %</label>
+        <label><input type="radio" name="unit" value="amt" form="shareForm"> $ 金額</label>
+      </span>
+      <button class="btn sm" type="button" id="copyABtn" onclick="copyFrom('A')">複製 A 餐</button>
+      <button class="btn sm" type="button" id="normaliseBtn" onclick="normalise()">自動調整至 100%</button>
     </div>
   </header>
   <form method="post" action="/admin/shares" id="shareForm">
     <input type="hidden" name="period" value="{{ period }}">
     <input type="hidden" name="scenario" value="{{ scenario }}">
-    <input type="hidden" name="unit" value="pct">
     <div class="body flush">
       <div class="table-wrap">
-        <table class="tbl">
+        <table class="tbl" id="shareTable">
           <thead>
             <tr>
               <th style="width:110px">店舖</th>
               <th>名稱</th>
               <th style="width:80px">地區</th>
-              <th class="num" style="width:120px">佔比 %</th>
+              <th class="num" style="width:120px" id="valueHead">佔比 %</th>
+              <th class="num conv-col" style="width:110px">換算後 %</th>
               <th class="num dim" style="width:120px">A 餐參考</th>
             </tr>
           </thead>
@@ -99,6 +115,7 @@
                        data-a="{{ '%.4f' % (all_shares['A'].get(code, 0) * 100) }}"
                        value="{{ '%.4f' % (current.get(code, 0) * 100) }}">
               </td>
+              <td class="num conv-col mono strong"><span class="conv-val">—</span></td>
               <td class="num dim">{{ '%.2f' % (all_shares['A'].get(code, 0) * 100) }}</td>
             </tr>
           {% endfor %}
@@ -108,7 +125,9 @@
     </div>
     <div class="body split" style="border-top:1px solid var(--border);background:var(--surface-2)">
       <span class="dim" style="font-size:12.5px">
-        以百分比為單位填寫，例如 5.2746 代表 5.2746%。留空或 0 表示該店不參與分配。
+        <span id="hintPct">以百分比為單位填寫，例如 5.2746 代表 5.2746%。留空或 0 表示該店不參與分配。</span>
+        <span id="hintAmt" hidden>以金額（例如生意額 <span class="mono">$$</span>）填寫，系統以所有店舖的總額按比例換算成百分比；
+          金額只是權重，<strong>不保證每店最後拿到的貨值等於你填的 $$</strong>。留空或 0 表示該店不參與分配。</span>
         佔比按「月份 + 餐別」存進資料庫，切換月份不會互相覆蓋；目前共 {{ storage.n_periods }} 個月份有紀錄。
       </span>
       <button class="btn primary" type="submit">儲存 {{ scenario }} 餐</button>
@@ -153,20 +172,94 @@
 
 <script>
 const inputs = [...document.querySelectorAll('.pct-input')];
+const totalLabel = document.getElementById('totalLabel');
 const totalVal = document.getElementById('totalVal');
+const totalUnit = document.getElementById('totalUnit');
 const totalPill = document.getElementById('totalPill');
+const table = document.getElementById('shareTable');
+const valueHead = document.getElementById('valueHead');
+const hintPct = document.getElementById('hintPct');
+const hintAmt = document.getElementById('hintAmt');
+const normaliseBtn = document.getElementById('normaliseBtn');
+const copyABtn = document.getElementById('copyABtn');
+const convVals = [...document.querySelectorAll('.conv-val')];
+const unitRadios = [...document.querySelectorAll('input[name="unit"]')];
+
+function currentUnit() {
+  const picked = unitRadios.find(el => el.checked);
+  return picked ? picked.value : 'pct';
+}
 
 function currentTotal() {
   return inputs.reduce((sum, el) => sum + (parseFloat(el.value) || 0), 0);
 }
+
+// One refresh path for both units: in $ mode each row shows what it will be
+// saved as, so nobody has to work out the percentage by hand — or discover it
+// only after saving.
 function refresh() {
+  const amt = currentUnit() === 'amt';
   const t = currentTotal();
+
+  table.classList.toggle('amt', amt);
+  valueHead.textContent = amt ? '金額 $' : '佔比 %';
+  hintPct.hidden = amt;
+  hintAmt.hidden = !amt;
+  normaliseBtn.style.display = amt ? 'none' : '';
+  copyABtn.style.display = amt ? 'none' : '';
+
+  inputs.forEach(el => {
+    if (amt) {
+      el.removeAttribute('max');
+      el.step = '0.01';
+    } else {
+      el.max = '100';
+      el.step = '0.0001';
+    }
+  });
+
+  if (amt) {
+    totalLabel.textContent = '總額 $';
+    totalUnit.textContent = '';
+    totalVal.textContent = t.toLocaleString('en-US', {maximumFractionDigits: 2});
+    inputs.forEach((el, i) => {
+      const v = parseFloat(el.value) || 0;
+      convVals[i].textContent = t > 0 ? (v * 100 / t).toFixed(4) + '%' : '—';
+    });
+    totalPill.classList.toggle('ok', t > 0);
+    totalPill.classList.toggle('warn', !(t > 0));
+    return;
+  }
+
+  totalLabel.textContent = '總和 ';
+  totalUnit.textContent = '%';
   totalVal.textContent = t.toFixed(2);
+  convVals.forEach(cell => { cell.textContent = '—'; });
   const ok = Math.abs(t - 100) < 0.005;
   totalPill.classList.toggle('ok', ok);
   totalPill.classList.toggle('warn', !ok);
 }
 inputs.forEach(el => el.addEventListener('input', refresh));
+
+// Switching unit on a filled grid would silently reinterpret 8% as $8, so the
+// boxes are emptied — deliberately, and with the choice put to the user.
+let lastUnit = currentUnit();
+unitRadios.forEach(el => el.addEventListener('change', () => {
+  const next = currentUnit();
+  if (next !== lastUnit && Math.abs(currentTotal()) > 1e-9) {
+    const msg = next === 'amt'
+      ? '切換到金額會清除畫面上的百分比，請以金額重新填寫。繼續？'
+      : '切換到百分比會清除畫面上的金額，請以百分比重新填寫。繼續？';
+    if (!confirm(msg)) {
+      const previous = unitRadios.find(r => r.value === lastUnit);
+      if (previous) previous.checked = true;
+    } else {
+      inputs.forEach(el => { el.value = ''; });
+    }
+  }
+  lastUnit = currentUnit();
+  refresh();
+}));
 
 function copyFrom(scenario) {
   if (!confirm('用 A 餐的比例覆寫目前欄位？畫面上未儲存前都不會影響系統。')) return;
@@ -182,6 +275,14 @@ function normalise() {
   });
   refresh();
 }
+
+document.getElementById('shareForm').addEventListener('submit', ev => {
+  if (currentUnit() === 'amt' && currentTotal() <= 0) {
+    ev.preventDefault();
+    alert('所有金額都是 0，無法換算成佔比。');
+  }
+});
+
 refresh();
 
 // The share file has no month column: where it lands is decided by the month

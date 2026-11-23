@@ -94,6 +94,53 @@
     </div>
   </section>
 
+  <details class="card" id="tempCard">
+    <summary>
+      <span class="title">臨時餐（可選）</span>
+      <span class="badge neutral" id="tempState" hidden>已啟用</span>
+      <span class="hint">只用於今次計算，不會存入資料庫</span>
+      <span class="chev" aria-hidden="true"></span>
+    </summary>
+    <div class="body">
+      <label class="choice">
+        <input type="checkbox" name="temp_on" value="1" id="tempOn">
+        <span>今次額外多算一個餐別（A／B／C 之後多一欄「T」）。
+          它的佔比只存在這份結果裡，<strong>不會覆寫每月 A／B／C 佔比</strong>；
+          結果過期或重新部署後就消失，要留底請即時匯出 Excel。</span>
+      </label>
+      <div id="tempPanel" hidden style="margin-top:14px">
+        <div class="row">
+          <div style="flex:1.2">
+            <label class="field"><span>名稱（選填）</span>
+              <input class="input" type="text" name="temp_name" maxlength="20"
+                     placeholder="例如：聖誕特別場；留空就叫「臨時餐」">
+            </label>
+          </div>
+          <div style="flex:.8">
+            <label class="field"><span>數值單位</span>
+              <select class="input" name="temp_unit">
+                <option value="pct">百分比 %</option>
+                <option value="amt">金額 $（按總額換算）</option>
+              </select>
+            </label>
+          </div>
+        </div>
+        <label class="field">
+          <span>店舖與數值（可直接從 Excel 複製兩欄貼上）</span>
+          <textarea class="input" name="temp_rows" rows="6"
+                    style="font-family:ui-monospace,Consolas,monospace;font-size:12.5px"
+                    placeholder="HB01&#9;12000&#10;HB02&#9;8500&#10;HB03&#9;6400"></textarea>
+        </label>
+        <p class="dim" style="font-size:12.5px;margin:6px 0 0">
+          每行「店舖代碼 + 數值」，Tab、逗號或空格分隔都可以。
+          選「金額」時，系統以所有店舖的總額按比例換算成百分比 ——
+          金額只是權重，<strong>不保證每店最後拿到的貨值等於你填的 $$</strong>。
+          只填部分店舖，其餘當 0%。用百分比填寫時總和不必等於 100%，系統會按比例正規化並提示。
+        </p>
+      </div>
+    </div>
+  </details>
+
   <section class="card">
     <header>
       <h2>兩個輸入檔案</h2>
@@ -379,6 +426,19 @@ targetEl.addEventListener('change', probeTarget);
 [startEl, endEl, daysEl].forEach(el => el.addEventListener('input', refreshPromo));
 modeEls.forEach(el => el.addEventListener('change', refreshPromo));
 refreshPromo();
+
+// 臨時餐: folded away by default, so a normal run looks exactly as it did
+// before this feature existed. Once ticked, the summary carries a badge —
+// otherwise a folded card would add a T column nobody can see coming.
+const tempOn = document.getElementById('tempOn');
+const tempPanel = document.getElementById('tempPanel');
+const tempState = document.getElementById('tempState');
+function refreshTemp() {
+  tempPanel.hidden = !tempOn.checked;
+  tempState.hidden = !tempOn.checked;
+}
+tempOn.addEventListener('change', refreshTemp);
+refreshTemp();
 </script>
 
 {% endblock %}

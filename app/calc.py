@@ -409,6 +409,26 @@ def normalise_shares(
     return raw, total, warnings
 
 
+def weights_to_shares(
+    weights: Dict[str, float],
+) -> Tuple[Dict[str, float], float, List[str]]:
+    """Turn per-shop weights — normally money amounts — into shares summing to 1.
+
+    A ``$$`` figure per shop is just another weighting of the same target, so
+    the conversion is a division by the total; nothing downstream needs to know
+    that the operator typed dollars. The raw total is returned so the caller can
+    print it back ("總額 $3,500,000"), and a zero total is refused rather than
+    divided by zero into a mix that looks valid but gives every shop 0.
+    """
+    clean = {str(k): max(float(v or 0), 0.0) for k, v in weights.items()}
+    total = sum(clean.values())
+    if total <= 0:
+        return {}, 0.0, ["所有店舖數值都是 0，無法換算成佔比"]
+    # Zero-weight shops are dropped, never carried as a 0 share: they take no
+    # part in the split, exactly like a blank percentage cell.
+    return {k: v / total for k, v in clean.items() if v > 0}, total, []
+
+
 def apportion(total: int, shares: Sequence[float]) -> List[int]:
     """Split an integer total by shares using the largest-remainder method.
 
