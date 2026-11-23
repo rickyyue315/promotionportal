@@ -14,10 +14,15 @@ For each shop:
     dispatch = ceil(gap / MOQ) × MOQ     (what actually gets sent, if gap > 0)
 
 MOQ is a property of the SKU on the stock side, not of the target: the buyer
-sets a target quantity, the warehouse file (SAP) says how the SKU is packed.
-So ``compute_scenario`` takes ``moq_by_sku`` and never reads a MOQ off
-``SkuTarget``. A SKU with no MOQ — or a stock file without the column — is
-treated as 1, i.e. quantities are not rounded at all.
+sets a target quantity, the SAP file says how the SKU is packed *for a site*.
+So ``compute_scenario`` takes ``moq_by_site`` (SKU -> site -> MOQ) and never
+reads a MOQ off ``SkuTarget``. Each shop is rounded up to its own site's MOQ:
+a site code is the unit that is actually packed and shipped, so another site's
+figure is not evidence of anything. The warehouse row (D001) is not a shop and
+its MOQ is never used — it is a carton size for the warehouse's own picking,
+and taking the largest MOQ on the SKU sent that carton to shops that order in
+sixes (user, 2026-11-23). A site with no MOQ — or a stock file without the
+column — is treated as 1, i.e. quantities are not rounded at all.
 
 For each SKU:
 
@@ -150,7 +155,7 @@ import math
 import re
 from dataclasses import dataclass, field, replace
 from datetime import date, timedelta
-from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple, Union
 
 COVERAGE_SUFFICIENT = "sufficient"  # total shop stock covers the target
 COVERAGE_SHORT = "short"  # not enough goods anywhere
@@ -247,6 +252,9 @@ class Line:
     # part of ``need_qty`` that the Target did not ask for.
     safety_qty: int = 0
     topup_qty: int = 0
+    # The MOQ applied to this line: its own site's figure from the stock file.
+    # Kept per line because two shops can pack the same SKU differently.
+    moq: int = 1
     supply_source: str = ""
     supply_mode: str = SUPPLY_WAREHOUSE
     po_qty: int = 0
@@ -471,16 +479,22 @@ def round_up_to(qty: float, moq: float) -> int:
     return int(math.ceil(qty / step) * step)
 
 
-def sku_moq(moq_by_sku: Optional[Dict[str, int]], sku: str) -> int:
-    """The MOQ to apply to one SKU, taken from the stock file.
+def shop_moq(per_shop: Optional[Dict[str, int]], shop: str) -> int:
+    """The MOQ to apply on one SKU × site line, taken from the stock file.
+
+    SAP carries MOQ per Article × Site, and the site is what gets packed, so
+    each shop is rounded up to the figure on *its own* row. The warehouse row is
+    deliberately absent from ``per_shop`` (main.py drops it): D001's MOQ is a
+    carton size for the warehouse, and reading the largest value on the SKU
+    handed that carton to shops that order in sixes (user, 2026-11-23).
 
     Missing, blank or unparseable values all mean "no minimum" rather than an
     error: a stock file without a MOQ column must still produce a report.
     """
-    if not moq_by_sku:
+    if not per_shop:
         return 1
     try:
-        value = int(round(float(moq_by_sku.get(sku, 1) or 1)))
+        value = int(round(float(per_shop.get(shop, 1) or 1)))
     except (TypeError, ValueError):
         return 1
     return max(value, 1)
@@ -655,8 +669,24 @@ def dispatch_window(promo: PromoWindow) -> Optional[Tuple[date, date]]:
     return start, end
 
 
+def _moq_steps(moq: Union[float, Sequence[int]], n: int) -> List[int]:
+    """One packing step per row: a single MOQ, or a MOQ per row.
+
+    MOQ is read per site, so two shops drawing on the same warehouse can take
+    different steps. Anything that is not a sequence is applied to every row.
+    """
+    if isinstance(moq, (int, float)) and not isinstance(moq, bool):
+        return [max(int(round(moq or 1)), 1)] * n
+    steps = [max(int(round(value or 1)), 1) for value in moq][:n]
+    if len(steps) < n:
+        steps.extend([1] * (n - len(steps)))
+    return steps
+
+
 def cap_to_available(
-    needs: Sequence[int], available: int, moq: float = 1
+    needs: Sequence[int],
+    available: int,
+    moq: Union[float, Sequence[int]] = 1,
 ) -> List[int]:
     """Share ``available`` units across ``needs``, in whole MOQ steps.
 
@@ -664,17 +694,23 @@ def cap_to_available(
     remainder method. Nothing is handed out beyond a shop's own need, and the
     result never exceeds ``available`` — a warehouse cannot send what it does
     not have.
+
+    ``moq`` is one step for every row or one step per row: each shop rounds to
+    its own site's packing size, so the step is not always shared.
     """
     n = len(needs)
     if n == 0:
         return []
-    step = max(int(round(moq or 1)), 1)
+    steps = _moq_steps(moq, n)
     total = sum(needs)
     if total <= 0:
         return [0] * n
     if available >= total:
         return list(needs)
+    if len(set(steps)) > 1:
+        return _cap_mixed(needs, available, steps)
 
+    step = steps[0]
     steps_available = max(int(available), 0) // step
     if steps_available <= 0:
         return [0] * n
@@ -697,6 +733,35 @@ def cap_to_available(
         if not moved:
             break
     return [o * step for o in out]
+
+
+def _cap_mixed(needs: Sequence[int], available: int, steps: Sequence[int]) -> List[int]:
+    """``cap_to_available`` when each row rounds to a different step.
+
+    Each row first takes the whole steps inside its proportional share; what is
+    left then goes to the row furthest below its share, so a shop with a big
+    packing size does not systematically lose to one with a small step.
+    """
+    n = len(needs)
+    total = sum(needs)
+    caps = [max(need // step, 0) for need, step in zip(needs, steps)]
+    share = [available * need / total for need in needs]
+    out = [min(int(math.floor(share[i] / steps[i])), caps[i]) for i in range(n)]
+    left = max(int(available) - sum(o * s for o, s in zip(out, steps)), 0)
+
+    while left > 0:
+        order = sorted(
+            range(n), key=lambda i: (-(share[i] - out[i] * steps[i]), i)
+        )
+        moved = False
+        for i in order:
+            if out[i] < caps[i] and steps[i] <= left:
+                out[i] += 1
+                left -= steps[i]
+                moved = True
+        if not moved:
+            break
+    return [o * s for o, s in zip(out, steps)]
 
 
 def _warehouse_short(rows: Sequence[dict], dispatched: Sequence[int]) -> int:
@@ -782,7 +847,7 @@ def _apply_group_topup(prepared: Sequence[dict], n_shops: int) -> None:
                 if row["share"] <= 0 or row["safety"] <= 0:
                     continue
                 on_hand = row["stock"] + row["pending"]
-                want = round_up_to(max(row["safety"] - on_hand, 0), item["moq"])
+                want = round_up_to(max(row["safety"] - on_hand, 0), row["moq"])
                 if want <= row["need"]:
                     continue
                 row["topup"] = want - row["need"]
@@ -941,7 +1006,7 @@ def compute_scenario(
     as_of: Optional[date] = None,
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
-    moq_by_sku: Optional[Dict[str, int]] = None,
+    moq_by_site: Optional[Dict[str, Dict[str, int]]] = None,
     supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
     vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
     safety_by_sku: Optional[Dict[str, Dict[str, int]]] = None,
@@ -958,8 +1023,9 @@ def compute_scenario(
 
     ``rp_gate_shops`` lists the shops where dispatch requires ``RP Type == RF``.
     ``warehouse_by_sku`` is the warehouse net stock that actually limits how much
-    can be sent. ``moq_by_sku`` comes from the stock file (SKU × shop): it is
-    what rounds each shop's need up, and the target file has no say in it.
+    can be sent. ``moq_by_site`` comes from the stock file (SKU -> site -> MOQ):
+    each shop is rounded up to its own site's figure, the warehouse row has been
+    dropped by the caller, and the target file has no say in it.
     ``supply_by_sku`` maps SKU -> shop -> ``Supply source`` code; only
     ``vendor_sources`` codes are supplied by PO instead of from D001, and those
     rows are allocated against the full promotion target — a PO covers the whole
@@ -981,6 +1047,7 @@ def compute_scenario(
     gate = {str(s).strip().upper() for s in rp_gate_shops if str(s).strip()}
     rp_map = rp_by_sku or {}
     sales_map = sales_by_sku or {}
+    moq_map = moq_by_site or {}
     warehouse = warehouse_by_sku or {}
     warehouse_pending = warehouse_pending_by_sku or {}
     supply_map = supply_by_sku or {}
@@ -1026,7 +1093,9 @@ def compute_scenario(
         per_shop_stock = stock_by_sku.get(target.sku, {})
         per_shop_rp = rp_map.get(target.sku, {})
         per_shop_sales = sales_map.get(target.sku, {})
-        moq = sku_moq(moq_by_sku, target.sku)
+        # MOQ is per site: a shop rounds to its own packing size, never to
+        # another site's (see the module docstring).
+        per_shop_moq = moq_map.get(target.sku, {})
 
         # Only the first few days of the target are sent out from D001, so the
         # promotion target is scaled down to the dispatch window before it is
@@ -1065,7 +1134,9 @@ def compute_scenario(
             alloc = full_alloc if vendor else window_alloc
 
             gap = alloc - on_hand
-            need = round_up_to(gap, moq) if gap > 0 else 0
+            # This shop's own packing size, from its row in the stock file.
+            row_moq = shop_moq(per_shop_moq, shop)
+            need = round_up_to(gap, row_moq) if gap > 0 else 0
 
             rate = daily_sales_rate(sales, as_of)
             expected = int(round(rate * promo_days)) if sales_known else 0
@@ -1098,6 +1169,7 @@ def compute_scenario(
                     "gated": gated,
                     "topup": 0,
                     "safety": int(round(float(per_shop_safety.get(shop, 0) or 0))),
+                    "moq": row_moq,
                     "surplus": max(stock - alloc, 0),
                     "supply_source": code,
                     "vendor": vendor,
@@ -1113,13 +1185,17 @@ def compute_scenario(
         ):
             missing_warehouse.append(target.sku)
 
+        rows_moqs = [r["moq"] for r in rows]
         prepared.append(
             {
                 "target": target,
                 "rows": rows,
                 "allocs": [r["alloc"] for r in rows],
                 "dispatch_target": dispatch_target,
-                "moq": moq,
+                # One step per shop: capping the warehouse cannot use a single
+                # figure when the shops pack the same SKU differently.
+                "moqs": rows_moqs,
+                "moq": max(rows_moqs) if rows_moqs else 1,
                 "available": available,
                 "candidates": [0 if r["blocked"] else r["need"] for r in rows],
             }
@@ -1139,6 +1215,7 @@ def compute_scenario(
         rows = item["rows"]
         allocs = item["allocs"]
         dispatch_target = item["dispatch_target"]
+        moqs = item["moqs"]
         moq = item["moq"]
         available = item["available"]
         candidates = item["candidates"]
@@ -1162,19 +1239,21 @@ def compute_scenario(
             capped_wh = [b + t for b, t in zip(base_wh, topup_wh)]
         else:
             base_alloc = (
-                cap_to_available(base_wh, available, moq)
+                cap_to_available(base_wh, available, moqs)
                 if sum(base_wh) > available
                 else base_wh
             )
             left = max(available - sum(base_alloc), 0)
             topup_alloc = (
-                cap_to_available(topup_wh, left, moq) if sum(topup_wh) > left else topup_wh
+                cap_to_available(topup_wh, left, moqs)
+                if sum(topup_wh) > left
+                else topup_wh
             )
             capped_wh = [b + t for b, t in zip(base_alloc, topup_alloc)]
         # A group cap hands out single units rather than MOQ steps, so what is
-        # left gets rounded once here. For a standalone SKU this is a no-op.
+        # left gets rounded once here, each row to its own shop's MOQ.
         capped = [
-            round_up_to(qty if row["vendor"] else wh, moq)
+            round_up_to(qty if row["vendor"] else wh, row["moq"])
             for row, qty, wh in zip(rows, candidates, capped_wh)
         ]
 
@@ -1286,6 +1365,7 @@ def compute_scenario(
                     short_qty=short,
                     safety_qty=row["safety"],
                     topup_qty=topup_qty,
+                    moq=row["moq"],
                     supply_source=row["supply_source"],
                     supply_mode=(
                         SUPPLY_VENDOR if row["vendor"] else SUPPLY_WAREHOUSE
@@ -1313,6 +1393,8 @@ def compute_scenario(
                 coverage_status=(
                     COVERAGE_SUFFICIENT if coverage_gap == 0 else COVERAGE_SHORT
                 ),
+                # The largest MOQ any shop uses on this SKU: the detail page
+                # shows it as "up to", the per-site figures are in 明細.
                 moq=moq,
                 dispatch_target=dispatch_target,
                 total_pending=total_pending,
@@ -1454,7 +1536,7 @@ def compute_all_scenarios(
     as_of: Optional[date] = None,
     warehouse_by_sku: Optional[Dict[str, int]] = None,
     warehouse_pending_by_sku: Optional[Dict[str, int]] = None,
-    moq_by_sku: Optional[Dict[str, int]] = None,
+    moq_by_site: Optional[Dict[str, Dict[str, int]]] = None,
     supply_by_sku: Optional[Dict[str, Dict[str, str]]] = None,
     vendor_sources: Sequence[str] = DEFAULT_VENDOR_SOURCES,
     safety_by_sku: Optional[Dict[str, Dict[str, int]]] = None,
@@ -1481,7 +1563,7 @@ def compute_all_scenarios(
             as_of=as_of,
             warehouse_by_sku=warehouse_by_sku,
             warehouse_pending_by_sku=warehouse_pending_by_sku,
-            moq_by_sku=moq_by_sku,
+            moq_by_site=moq_by_site,
             supply_by_sku=supply_by_sku,
             vendor_sources=vendor_sources,
             safety_by_sku=safety_by_sku,

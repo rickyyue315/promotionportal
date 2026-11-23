@@ -793,6 +793,88 @@ def test_stock_file_without_moq_does_not_round(client):
     assert any("沒有 MOQ 欄位" in w for w in run.params["warnings"]["A"])
 
 
+def test_each_site_uses_its_own_moq(client):
+    """A shop rounds to its own site's MOQ; D001's carton never reaches it.
+
+    User's report (2026-11-23): 店舖派貨時會認錯 D001 的 MOQ. The old code took
+    the largest MOQ on the SKU — exactly the warehouse carton — and rounded every
+    shop to it, so a shop packing in sixes was dispatched in 48s.
+    """
+    period = "2027-05"
+    sku = "111058302501"
+    db.upsert_shop("HA19", "HA19 門市", "HK")
+    db.upsert_shop("HA21", "HA21 門市", "HK")
+    db.save_shares(period, "A", {"HA19": 0.5, "HA21": 0.5}, "tester")
+
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "貨品名稱", "Target Qty"])
+    ws.append([sku, "面膜", 100])
+    target = io.BytesIO()
+    wb.save(target)
+
+    wb = Workbook()
+    ws = wb.active
+    ws.append(["SKU", "店舖", "庫存", "MOQ"])
+    ws.append([sku, "D001", 1000, 48])       # the warehouse's own carton
+    ws.append([sku, "HA19", 0, 6])           # the shops pack differently
+    ws.append([sku, "HA21", 0, 12])
+    stock = io.BytesIO()
+    wb.save(stock)
+
+    login(client, "adminpw", "Ricky")
+    resp = client.post(
+        "/run/new",
+        data={"period": period, **PROMO},
+        files={
+            "target_file": ("target.xlsx", target.getvalue()),
+            "stock_file": ("stock.xlsx", stock.getvalue()),
+        },
+        follow_redirects=False,
+    )
+    assert resp.status_code == 303, resp.text
+    token = resp.headers["location"].rstrip("/").split("/")[-1]
+
+    run = runstore.get(token)
+    lines = {ln.shop_code: ln for ln in run.results["A"].lines}
+    assert "D001" not in lines                       # the warehouse is not a shop
+    assert lines["HA19"].moq == 6
+    assert lines["HA21"].moq == 12
+    # 50 of gap each: 54 for the six-pack shop, 60 for the dozen-pack one. With
+    # D001's 48 leaking in, both would have been sent 96.
+    assert lines["HA19"].need_qty == 54
+    assert lines["HA21"].need_qty == 60
+    # The headline is the largest a shop actually uses, never the warehouse's.
+    assert run.results["A"].skus[0].moq == 12
+
+    # The detail page lists the step it applied to each shop, so the rounding
+    # can be checked without opening the export.
+    page = client.get(f"/run/{token}/detail?sku={sku}")
+    assert page.status_code == 200
+    assert "<th class=\"num\" title=\"取自庫存檔中該店（Site Code）自己的 MOQ" in page.text
+
+    # The detail sheet prints the MOQ applied to each row, so a wrong step is
+    # visible in the file the buyer keeps.
+    export = client.get(f"/run/{token}/export.xlsx")
+    assert export.status_code == 200
+    from openpyxl import load_workbook
+
+    book = load_workbook(io.BytesIO(export.content))
+    sheet = book["明細_A"]
+    head = [c.value for c in next(sheet.iter_rows(min_row=1, max_row=1))]
+    moq_col = head.index("MOQ")
+    shop_col = head.index("店舖")
+    by_shop = {
+        row[shop_col]: row[moq_col]
+        for row in sheet.iter_rows(min_row=2, values_only=True)
+    }
+    assert by_shop["HA19"] == 6
+    assert by_shop["HA21"] == 12
+    book.close()
+
+
 def _sap_full_bytes(rows):
     """A SAP export with the full column set the real file carries."""
     from openpyxl import Workbook

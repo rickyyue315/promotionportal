@@ -171,7 +171,7 @@
           <p class="dim" style="font-size:12.5px;margin:0">
             寬表（第一欄 SKU，每欄一店）或長表（SKU／店舖／數量）都可以；
             SAP 明細（Article／Site／SaSa Net Stock／Unrestr. Consignment／RP Type／MOQ／Supply source）可直接上載，
-            MOQ 用來進位，Supply source 決定行貨開 PO 還是倉貨開 STO（D001 忽略）。
+            MOQ 按每個 Site Code 各自的數值進位（D001 忽略），Supply source 決定行貨開 PO 還是倉貨開 STO。
             <a href="/run/template/stock">下載範本</a>
           </p>
         </div>
@@ -223,7 +223,7 @@
     <div class="body" style="font-size:13px;color:var(--text-2)">
       <p style="margin:0 0 10px"><strong>1. 縮小 Target</strong>　推廣 14 日但只派 4 日貨，派貨目標 = Target × 4 ÷ 14。共用 Target 的貨組要先拆回各 SKU 才縮小，見下方「共用 Target（貨組）」。</p>
       <p style="margin:0 0 10px"><strong>2. 拆到店舖</strong>　按該餐的店舖佔比分配派貨目標，用最大餘數法確保加起來剛好等於派貨目標。</p>
-      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按庫存檔的 MOQ 向上取至倍數（沒有 MOQ 欄就不進位）。</p>
+      <p style="margin:0 0 10px"><strong>3. 算需求</strong>　每店「分配數量 − 現有庫存 − 在途」，正數就是需要派貨；再按<strong>該店（Site Code）在庫存檔的 MOQ</strong> 向上取至倍數（沒有 MOQ 欄就不進位）。貨倉 D001 那行的 MOQ 不計 —— 那是倉庫的箱規格，不是店舖的落單單位。</p>
       {% if rp_gate_shops %}
       <p style="margin:0 0 10px"><strong>3b. RP Type</strong>　{{ rp_gate_shops | join('、') }} 例外：只有 RP Type = RF 才派貨，ND 或未提供一律 0 件；其他店舖不理會。</p>
       {% endif %}

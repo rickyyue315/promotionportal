@@ -69,7 +69,7 @@
         <div><div class="k">需求 ／ 可派</div><div class="v">{{ selected.need_qty | num }} ／ {{ selected.total_dispatch | num }}</div></div>
         <div><div class="k">缺貨</div>
           <div class="v"><span class="badge {{ 'danger' if selected.short_qty else 'ok' }}">{{ selected.short_qty | num }}</span></div></div>
-        <div><div class="k" title="取自庫存檔的 MOQ">MOQ</div><div class="v">{{ selected.moq }}</div></div>
+        <div><div class="k" title="取自庫存檔的 MOQ。每間店按自己 Site Code 的 MOQ 進位，這裡是各店最大的一個；逐店數字見下表 MOQ 欄（貨倉 D001 那行不計）">MOQ</div><div class="v">{{ selected.moq }}</div></div>
       </div>
       <div class="table-wrap">
         <table class="tbl">
@@ -84,6 +84,7 @@
               <th class="num" title="{{ 'SaSa Net Stock ＋ Unrestr. Consignment（任一欄有數就計）' if params.has_consignment else 'SaSa Net Stock' }}">現有庫存</th>
               <th class="num">在途</th>
               <th class="num">差距</th>
+              {% if params.has_moq %}<th class="num" title="取自庫存檔中該店（Site Code）自己的 MOQ；貨倉 D001 那行不計（倉庫的箱規格與店舖落單無關）">MOQ</th>{% endif %}
               <th class="num">需求</th>
               <th class="num">可派</th>
               <th class="num">缺貨</th>
@@ -120,6 +121,7 @@
               <td class="num">{{ ln.stock_qty | num }}</td>
               <td class="num">{{ ln.pending_qty | num }}</td>
               <td class="num" style="color:{{ '#b3392c' if ln.gap_qty > 0 else 'var(--muted)' }}">{{ ln.gap_qty | num }}</td>
+              {% if params.has_moq %}<td class="num">{{ ln.moq }}</td>{% endif %}
               <td class="num">{{ ln.need_qty | num }}{% if ln.topup_qty %}<span class="badge neutral" style="margin-left:4px" title="其中 {{ ln.topup_qty | num }} 件屬 Safety 補底：該店可用量 {{ (ln.stock_qty + ln.pending_qty) | num }} 件，低於 Safety Stock {{ ln.safety_qty | num }} 件，補派至 Safety 水平（按 MOQ 進位）">補底 {{ ln.topup_qty | num }}</span>{% endif %}</td>
               <td class="num">
                 {% if ln.dispatch_qty %}
@@ -150,6 +152,7 @@
               <td class="num">{{ lines | sum(attribute='stock_qty') | num }}</td>
               <td class="num">{{ lines | sum(attribute='pending_qty') | num }}</td>
               <td class="num"></td>
+              {% if params.has_moq %}<td class="num"></td>{% endif %}
               <td class="num">{{ lines | rejectattr('blocked') | sum(attribute='need_qty') | num }}</td>
               <td class="num">{{ lines | sum(attribute='dispatch_qty') | num }}</td>
               <td class="num">{{ lines | sum(attribute='short_qty') | num }}</td>
@@ -204,7 +207,8 @@
       </div>
       {% endif %}
       <div class="body" style="border-top:1px solid var(--border);background:var(--surface-2);font-size:12.5px;color:var(--muted)">
-        「需求」是分配量減去現有庫存與在途後的缺口，再按庫存檔的 MOQ 向上取整（上面那個 MOQ）；
+        「需求」是分配量減去現有庫存與在途後的缺口，再按<strong>該店自己 Site Code 的 MOQ</strong>
+        向上取整{% if params.has_moq %}（見下表 MOQ 欄；貨倉 D001 那行不計，它的箱規格不是店舖的落單單位）{% endif %}；
         「可派」受 D001 倉存限制，不足時按需求比例分配（只計倉貨店舖）。
         {% if selected.short_qty %}
         <br>這個 SKU 的貨倉（D001）不夠派，所以「可調出」列出各倉貨店舖手上有多少可以抽走：

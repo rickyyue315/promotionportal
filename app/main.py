@@ -694,25 +694,24 @@ async def run_create(
     safety_by_sku: Dict[str, Dict[str, int]] = {}
     warehouse_by_sku: Dict[str, int] = {}
     warehouse_pending: Dict[str, int] = {}
-    # MOQ is a SKU property carried on the stock file; when shops disagree the
-    # largest wins (never under-order) and the conflict is reported.
-    moq_by_sku: Dict[str, int] = {}
-    moq_conflict: set = set()
+    # MOQ is read per site (SKU -> shop code -> MOQ). A shop rounds its need up
+    # to the packing size on its own row, so one site's figure never leaks into
+    # another. The warehouse row is skipped below like every other per-shop
+    # field: D001's MOQ is a carton size for the warehouse, and taking the
+    # largest value per SKU used to send it to shops that order in sixes
+    # (user, 2026-11-23).
+    moq_by_site: Dict[str, Dict[str, int]] = {}
 
     for row in parsed_s.rows:
-        if row.moq > 1:
-            prev = moq_by_sku.get(row.sku)
-            if prev is None:
-                moq_by_sku[row.sku] = row.moq
-            elif prev != row.moq:
-                moq_conflict.add(row.sku)
-                moq_by_sku[row.sku] = max(prev, row.moq)
         if row.shop in warehouse_codes:
             warehouse_by_sku[row.sku] = warehouse_by_sku.get(row.sku, 0) + row.qty
             warehouse_pending[row.sku] = (
                 warehouse_pending.get(row.sku, 0) + row.pending
             )
             continue
+        if row.moq > 1:
+            per_shop_moq = moq_by_site.setdefault(row.sku, {})
+            per_shop_moq[row.shop] = max(per_shop_moq.get(row.shop, 1), row.moq)
         stock_by_sku.setdefault(row.sku, {})[row.shop] = row.qty
         if row.rp_type:
             rp_by_sku.setdefault(row.sku, {})[row.shop] = row.rp_type
@@ -805,7 +804,7 @@ async def run_create(
         as_of=db.today(),
         warehouse_by_sku=warehouse_by_sku if has_warehouse else None,
         warehouse_pending_by_sku=warehouse_pending,
-        moq_by_sku=moq_by_sku,
+        moq_by_site=moq_by_site,
         supply_by_sku=supply_by_sku,
         vendor_sources=vendors,
         safety_by_sku=safety_by_sku,
@@ -849,12 +848,6 @@ async def run_create(
         for res in results.values():
             res.warnings.append(
                 "庫存檔沒有 MOQ 欄位，全部 SKU 當作 MOQ = 1（需求不進位）"
-            )
-    if moq_conflict:
-        for res in results.values():
-            res.warnings.append(
-                f"有 {len(moq_conflict)} 個 SKU 在庫存檔不同店舖的 MOQ 不一致，"
-                "已取最大值（例：" + sorted(moq_conflict)[0] + "）"
             )
 
     if topup_on and not has_safety and any(t.group for t in targets):

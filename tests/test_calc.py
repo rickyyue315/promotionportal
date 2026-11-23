@@ -23,7 +23,7 @@ from app.calc import (
     normalise_shares,
     round_up_to,
     sales_window_start,
-    sku_moq,
+    shop_moq,
     split_shared_targets,
     supply_code,
     supply_mode,
@@ -80,21 +80,22 @@ class TestRoundUpTo:
         assert round_up_to(qty, moq) == expected
 
 
-class TestSkuMoq:
+class TestShopMoq:
     def test_missing_map_means_one(self):
-        assert sku_moq(None, "SKU1") == 1
-        assert sku_moq({}, "SKU1") == 1
+        assert shop_moq(None, "S1") == 1
+        assert shop_moq({}, "S1") == 1
 
-    def test_unknown_sku_means_one(self):
-        assert sku_moq({"SKU2": 12}, "SKU1") == 1
+    def test_unknown_site_means_one(self):
+        assert shop_moq({"S2": 12}, "S1") == 1
 
     def test_blank_or_zero_means_one(self):
-        assert sku_moq({"SKU1": 0}, "SKU1") == 1
-        assert sku_moq({"SKU1": ""}, "SKU1") == 1
+        assert shop_moq({"S1": 0}, "S1") == 1
+        assert shop_moq({"S1": ""}, "S1") == 1
 
-    def test_value_is_read_from_the_stock_map(self):
-        assert sku_moq({"SKU1": 12}, "SKU1") == 12
-        assert sku_moq({"SKU1": "6"}, "SKU1") == 6
+    def test_value_is_read_from_that_site_only(self):
+        assert shop_moq({"S1": 12, "S2": 6}, "S1") == 12
+        assert shop_moq({"S1": 12, "S2": 6}, "S2") == 6
+        assert shop_moq({"S1": "6"}, "S1") == 6
 
 
 class TestNormaliseShares:
@@ -175,7 +176,7 @@ class TestComputeScenario:
             [1.0],
             [SkuTarget("SKU1", 100)],
             {"SKU1": {"S1": 5}},
-            moq_by_sku={"SKU1": 12},
+            moq_by_site={"SKU1": {"S1": 12}},
         )
         # gap = 95 -> ceil(95/12)*12 = 96
         assert res.lines[0].dispatch_qty == 96
@@ -188,7 +189,7 @@ class TestComputeScenario:
             [1.0],
             [SkuTarget("SKU1", 10)],
             {"SKU1": {"S1": 50}},
-            moq_by_sku={"SKU1": 12},
+            moq_by_site={"SKU1": {"S1": 12}},
         )
         assert res.lines[0].dispatch_qty == 0
 
@@ -199,6 +200,39 @@ class TestComputeScenario:
         )
         assert res.lines[0].dispatch_qty == 95
         assert res.skus[0].moq == 1
+
+    def test_each_shop_rounds_to_its_own_site_moq(self):
+        """MOQ is read per site: one shop's packing size never covers another."""
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            [SkuTarget("SKU1", 100)],
+            {"SKU1": {"S1": 0, "S2": 0}},
+            moq_by_site={"SKU1": {"S1": 6, "S2": 12}},
+        )
+        lines = {ln.shop_code: ln for ln in res.lines}
+        assert lines["S1"].moq == 6 and lines["S1"].need_qty == 54
+        assert lines["S2"].moq == 12 and lines["S2"].need_qty == 60
+        # The SKU headline is the largest any shop uses, for the page only.
+        assert res.skus[0].moq == 12
+
+    def test_warehouse_cap_keeps_each_shops_step(self):
+        # 100 of need each against 20 units in D001: the six-pack shop takes 6,
+        # the dozen-pack shop 12 — every row still lands on its own multiple.
+        res = compute_scenario(
+            "A",
+            ["S1", "S2"],
+            [0.5, 0.5],
+            [SkuTarget("SKU1", 200)],
+            {"SKU1": {"S1": 0, "S2": 0}},
+            warehouse_by_sku={"SKU1": 20},
+            moq_by_site={"SKU1": {"S1": 6, "S2": 12}},
+        )
+        lines = {ln.shop_code: ln for ln in res.lines}
+        assert lines["S1"].dispatch_qty == 6
+        assert lines["S2"].dispatch_qty == 12
+        assert sum(ln.dispatch_qty for ln in res.lines) <= 20
 
     def test_alloc_always_sums_to_target(self):
         targets = [SkuTarget("SKU1", 833), SkuTarget("SKU2", 7)]
@@ -422,6 +456,18 @@ class TestCapToAvailable:
     def test_never_gives_more_than_asked(self):
         out = cap_to_available([3, 100], 50)
         assert out[0] <= 3
+
+    def test_each_row_can_have_its_own_step(self):
+        # A six-pack shop and a dozen-pack shop sharing 20 units.
+        out = cap_to_available([100, 100], 20, moq=[6, 12])
+        assert out == [6, 12]
+        assert sum(out) <= 20
+
+    def test_mixed_steps_never_exceed_available(self):
+        steps = [6, 12, 24]
+        out = cap_to_available([100, 100, 100], 130, moq=steps)
+        assert sum(out) <= 130
+        assert all(q % s == 0 for q, s in zip(out, steps))
 
 
 class TestPromoAndWarehouseInScenario:
@@ -714,7 +760,7 @@ class TestSharedTarget:
             [1.0],
             targets,
             {self.A: {"S1": 3500}, self.B: {}},
-            moq_by_sku={self.B: 6},
+            moq_by_site={self.B: {"S1": 6}},
         )
         dispatched = sum(line.dispatch_qty for line in res.lines)
         assert dispatched % 6 == 0
@@ -784,7 +830,7 @@ class TestGroupSafetyTopup:
         res = self.run(
             {self.A: {"S1": 0}, self.B: {"S1": 450}},
             {self.A: {"S1": 100}},
-            moq_by_sku={self.A: 6},
+            moq_by_site={self.A: {"S1": 6}},
         )
         assert self.line(res, self.A).dispatch_qty == 102
 
@@ -1107,7 +1153,7 @@ class TestVendorFullPeriodTarget:
             [SkuTarget("K", 1000)],
             {},
             promo=self.PROMO,
-            moq_by_sku={"K": 12},
+            moq_by_site={"K": {"V1": 12}},
             supply_by_sku={"K": {"V1": "1"}},
         )
         assert res.lines[0].po_qty == 1008

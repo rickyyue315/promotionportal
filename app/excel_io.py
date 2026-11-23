@@ -1560,7 +1560,6 @@ def export_run(
                 26: "受 RP 管制的行以淺紫標示；ND 店舖名單見「ND 派貨」工作表",
             },
         )
-        moq_of = {s.sku: s.moq for s in res.skus}
         # Name and brand per SKU, not per comparison row: a shared target used
         # to collapse to one "A + B 等 3 個" row, which left the members' 貨品名稱
         # blank on this sheet. The summaries know every SKU by itself.
@@ -1594,7 +1593,7 @@ def export_run(
                 ln.pending_qty,
                 ln.on_hand,
                 ln.gap_qty,
-                moq_of.get(ln.sku, 1),
+                ln.moq,
                 ln.safety_qty,
                 ln.topup_qty,
                 ln.need_qty,
@@ -1825,7 +1824,13 @@ def export_run(
     if params.get("has_moq") is False:
         ws3.append(["MOQ", "庫存檔沒有 MOQ 欄，全部當作 1（需求不進位）"])
     elif params.get("has_moq"):
-        ws3.append(["MOQ 來源", "店舖庫存檔的 MOQ 欄；每店需求向上取至 MOQ 倍數"])
+        ws3.append(
+            [
+                "MOQ 來源",
+                "店舖庫存檔的 MOQ 欄，逐個 Site Code 套用（D001 貨倉那行不計）；"
+                "每店需求向上取至該店自己的 MOQ 倍數",
+            ]
+        )
     if params.get("has_brand") is False:
         ws3.append(
             ["Brand Code", "Target 檔沒有 Brand code 欄，匯出檔的 Brand Code 留空"]
@@ -2031,7 +2036,7 @@ def export_stock_template(shops: Sequence[str]) -> bytes:
     note.append(["寬表：第一欄 SKU，之後每欄一個店舖代碼"])
     note.append(["或改成三欄長表：SKU / 店舖 / 庫存，系統會自動辨識"])
     note.append(["長表可加一欄 RP Type（例如 ND / RF）；HB87 只有 RF 才派貨，其餘店舖不看這欄"])
-    note.append(["長表可加一欄 MOQ；每店需求會向上取至 MOQ 的倍數（同一 SKU 取最大）"])
+    note.append(["長表可加一欄 MOQ；每店需求會向上取至該店（Site Code）自己的 MOQ 倍數，D001 貨倉那行不計"])
     note.append(
         [
             "長表可加一欄 Safety Stock；只用作共用 Target（貨組）的補底線，"
